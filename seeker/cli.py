@@ -22,6 +22,7 @@ from .cv_parser import load_cv_text, parse_cv, build_search_preferences
 from .models import CVProfile, SearchPreferences, JobListing
 from .scrapers import scrape_all, ALL_SCRAPERS
 from .matcher import rank_jobs, generate_summary
+from .interactive import browse
 
 load_dotenv()
 
@@ -148,21 +149,26 @@ def search(
 
     console.print(f"[bold green]✓[/bold green] Scored and ranked [bold]{len(ranked)}[/bold] top matches.\n")
 
-    # ── Step 5: Display results ───────────────────────────────────────────────
-    _print_results(ranked)
+    if not ranked:
+        console.print(Panel(
+            "No jobs scored above the threshold.\nTry [cyan]--min-score 30[/cyan] or [cyan]--days 30[/cyan] to widen results.",
+            border_style="yellow",
+        ))
+        raise typer.Exit(0)
 
-    # ── Step 6: AI summary ────────────────────────────────────────────────────
+    # ── Step 5: AI summary ────────────────────────────────────────────────────
     with console.status("[bold cyan]Generating strategic summary...", spinner="dots"):
         summary = generate_summary(ranked, profile, client)
 
-    console.print(
-        Panel(
-            Markdown(summary),
-            title="[bold magenta]AI Career Advisor Summary[/bold magenta]",
-            border_style="magenta",
-            padding=(1, 2),
-        )
-    )
+    console.print(Panel(
+        Markdown(summary),
+        title="[bold magenta]AI Career Advisor Summary[/bold magenta]",
+        border_style="magenta",
+        padding=(1, 2),
+    ))
+
+    # ── Step 6: Interactive browser ───────────────────────────────────────────
+    browse(ranked, profile, client)
 
     # ── Step 7: Export ────────────────────────────────────────────────────────
     if export:
