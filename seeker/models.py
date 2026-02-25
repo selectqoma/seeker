@@ -23,7 +23,8 @@ class CVProfile:
 @dataclass
 class SearchPreferences:
     """User preferences for job search."""
-    remote_only: bool = False
+    remote_only: bool = True
+    max_days_old: int = 14
     locations: list[str] = field(default_factory=list)
     min_salary: Optional[int] = None
     max_salary: Optional[int] = None

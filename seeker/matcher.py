@@ -1,94 +1,111 @@
 """Job matching and ranking using Claude."""
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .models import CVProfile, SearchPreferences, JobListing
 
 logger = logging.getLogger(__name__)
 
-SCORE_PROMPT = """You are an expert talent and recruiting advisor.
+# Compact schema — short responses = no truncation
+SCORE_PROMPT = """Candidate: {current_title}, {years_experience}y exp, skills: {skills}, targets: {target_titles}
 
-CANDIDATE PROFILE:
-- Name: {name}
-- Current Title: {current_title}
-- Years of Experience: {years_experience}
-- Skills: {skills}
-- Target Roles: {target_titles}
-- Industries: {industries}
-- Summary: {summary}
-- Education: {education}
+Job: {title} @ {company} ({location})
+Tags: {tags}
+Description: {description}
 
-JOB LISTING:
-- Title: {title}
-- Company: {company}
-- Location: {location}
-- Type: {job_type}
-- Salary: {salary}
-- Tags: {tags}
-- Description:
-{description}
+Score 0-100 fit. Return ONLY this JSON (keep strings under 80 chars):
+{{"score":<int>,"fit":"one sentence why good fit","gap":"main concern or none"}}"""
 
-Score this job for the candidate on a scale of 0-100.
-Consider:
-1. Title/role alignment with candidate's experience and targets
-2. Skills match (required vs possessed)
-3. Experience level match
-4. Potential for growth
-5. Any red flags or concerns
 
-Return ONLY valid JSON:
-{{
-  "score": <integer 0-100>,
-  "reasons": ["reason1", "reason2", "reason3"],
-  "concerns": ["concern1"],
-  "one_liner": "Brief 1-sentence summary of fit"
-}}"""
+@retry(
+    retry=retry_if_exception_type(anthropic.RateLimitError),
+    wait=wait_exponential(multiplier=2, min=5, max=60),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+def _call_api(client: anthropic.Anthropic, prompt: str) -> str:
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=150,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()
+
+
+def _parse_score_response(raw: str) -> dict:
+    """Parse JSON response with fallback regex extraction."""
+    # Strip markdown fences
+    if "```" in raw:
+        raw = raw.split("```")[1].lstrip("json").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: extract score with regex if JSON is malformed
+        m = re.search(r'"score"\s*:\s*(\d+)', raw)
+        if m:
+            fit_m = re.search(r'"fit"\s*:\s*"([^"]*)"', raw)
+            gap_m = re.search(r'"gap"\s*:\s*"([^"]*)"', raw)
+            return {
+                "score": int(m.group(1)),
+                "fit": fit_m.group(1) if fit_m else "",
+                "gap": gap_m.group(1) if gap_m else "",
+            }
+        raise
 
 
 def _score_job(job: JobListing, profile: CVProfile, client: anthropic.Anthropic) -> JobListing:
     prompt = SCORE_PROMPT.format(
-        name=profile.name,
         current_title=profile.current_title,
         years_experience=profile.years_experience,
-        skills=", ".join(profile.skills[:20]),
+        skills=", ".join(profile.skills[:12]),
         target_titles=", ".join(profile.target_titles),
-        industries=", ".join(profile.industries),
-        summary=profile.summary[:400],
-        education=", ".join(profile.education),
         title=job.title,
         company=job.company,
         location=job.location,
-        job_type=job.job_type,
-        salary=job.salary,
-        tags=", ".join(job.tags[:10]),
-        description=job.description[:800],
+        tags=", ".join(job.tags[:6]),
+        description=job.description[:300],
     )
     try:
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # Fast + cheap for batch scoring
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        data = json.loads(raw)
+        raw = _call_api(client, prompt)
+        data = _parse_score_response(raw)
         job.match_score = float(data.get("score", 0))
-        job.match_reasons = data.get("reasons", [])
-        job.match_concerns = data.get("concerns", [])
-        # Store one_liner in reasons if present
-        one_liner = data.get("one_liner", "")
-        if one_liner:
-            job.match_reasons = [one_liner] + job.match_reasons
+        fit = data.get("fit", "")
+        gap = data.get("gap", "")
+        if fit:
+            job.match_reasons = [fit]
+        if gap and gap.lower() != "none":
+            job.match_concerns = [gap]
     except Exception as e:
         logger.warning(f"Scoring failed for '{job.title}' at '{job.company}': {e}")
         job.match_score = 0.0
     return job
+
+
+def _is_relevant(job: JobListing, profile: CVProfile) -> bool:
+    """Cheap keyword pre-filter — skip API call if job is clearly off-domain.
+
+    Splits multi-word terms so 'machine learning' matches a job containing
+    just 'machine' or 'learning', and checks against title+tags only (fast).
+    """
+    words = set()
+    for term in profile.target_titles + profile.skills[:15] + profile.industries:
+        for word in term.lower().split():
+            if len(word) > 3:  # skip short noise words
+                words.add(word)
+
+    # Check title and tags first (most reliable signal, no HTML noise)
+    haystack = (job.title + " " + " ".join(job.tags)).lower()
+    if any(w in haystack for w in words):
+        return True
+
+    # Fall back to description snippet
+    haystack_desc = job.description[:400].lower()
+    return any(w in haystack_desc for w in words)
 
 
 def rank_jobs(
@@ -97,19 +114,27 @@ def rank_jobs(
     prefs: SearchPreferences,
     client: anthropic.Anthropic,
     top_n: int = 20,
-    max_workers: int = 8,
+    max_workers: int = 3,
+    min_score: float = 50.0,
 ) -> list[JobListing]:
-    """Score all jobs concurrently and return top N ranked."""
+    """Score all jobs concurrently and return top N ranked above min_score."""
     if not jobs:
         return []
 
-    # Pre-filter: exclude keyword blocklist
+    # Drop explicitly excluded keywords
     if prefs.excluded_keywords:
         excluded = [k.lower() for k in prefs.excluded_keywords]
         jobs = [
             j for j in jobs
             if not any(e in (j.title + j.description).lower() for e in excluded)
         ]
+
+    # Cheap pre-filter: skip jobs with zero domain overlap (saves API calls)
+    before = len(jobs)
+    jobs = [j for j in jobs if _is_relevant(j, profile)]
+    skipped = before - len(jobs)
+    if skipped:
+        logger.info(f"Pre-filter dropped {skipped} off-domain jobs before scoring.")
 
     logger.info(f"Scoring {len(jobs)} jobs with Claude (workers={max_workers})...")
 
@@ -122,6 +147,7 @@ def rank_jobs(
             except Exception as e:
                 logger.warning(f"Future error: {e}")
 
+    scored = [j for j in scored if j.match_score >= min_score]
     scored.sort(key=lambda j: j.match_score, reverse=True)
     return scored[:top_n]
 

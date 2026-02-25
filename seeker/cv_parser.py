@@ -26,7 +26,7 @@ def load_cv_text(cv_path: str) -> str:
 PARSE_PROMPT = """You are a CV/resume parser. Extract structured information from the CV text below.
 
 Return ONLY valid JSON with this exact structure:
-{
+{{
   "name": "Full Name",
   "email": "email@example.com",
   "location": "City, Country",
@@ -38,7 +38,7 @@ Return ONLY valid JSON with this exact structure:
   "target_titles": ["Job Title 1", "Job Title 2"],
   "industries": ["Industry 1", "Industry 2"],
   "education": ["Degree, University, Year"]
-}
+}}
 
 Rules:
 - years_experience: integer, estimate from work history
@@ -84,7 +84,8 @@ def parse_cv(cv_text: str, client: anthropic.Anthropic) -> CVProfile:
 def build_search_preferences(profile: CVProfile, user_prefs: dict) -> SearchPreferences:
     """Merge CV profile with user-supplied preferences."""
     return SearchPreferences(
-        remote_only=user_prefs.get("remote_only", False),
+        remote_only=user_prefs.get("remote_only", True),
+        max_days_old=user_prefs.get("max_days_old", 14),
         locations=user_prefs.get("locations", [profile.location] if profile.location else []),
         min_salary=user_prefs.get("min_salary"),
         max_salary=user_prefs.get("max_salary"),

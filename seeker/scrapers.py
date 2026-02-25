@@ -1,14 +1,14 @@
 """Web scrapers for multiple job boards."""
 import re
-import time
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode, quote_plus
 
 import httpx
 import feedparser
 from bs4 import BeautifulSoup
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .models import JobListing, CVProfile, SearchPreferences
 
@@ -18,20 +18,89 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 
-def _get(url: str, timeout: int = 15) -> httpx.Response:
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=timeout) as client:
+def _get(url: str, timeout: int = 20, extra_headers: dict = None) -> httpx.Response:
+    headers = {**HEADERS, **(extra_headers or {})}
+    with httpx.Client(headers=headers, follow_redirects=True, timeout=timeout) as client:
         return client.get(url)
 
 
 def _soup(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "lxml")
+
+
+def _clean_html(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(separator="\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _parse_date(raw: str) -> datetime | None:
+    """Try to parse various date formats into a UTC datetime."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    # ISO format
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw[:19], fmt[:len(fmt)])
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    # RFC 2822 (RSS)
+    try:
+        return parsedate_to_datetime(raw).astimezone(timezone.utc)
+    except Exception:
+        pass
+    # "X days ago" / "X hours ago"
+    m = re.search(r"(\d+)\s+(day|hour|minute)", raw.lower())
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        delta = timedelta(days=n) if unit == "day" else timedelta(hours=n)
+        return datetime.now(timezone.utc) - delta
+    return None
+
+
+def _is_recent(posted_date: str, max_days: int) -> bool:
+    """Return True if the job was posted within max_days, or date is unknown."""
+    if not posted_date:
+        return True  # unknown date → keep
+    dt = _parse_date(posted_date)
+    if dt is None:
+        return True
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
+    return dt >= cutoff
+
+
+def _build_queries(profile: CVProfile, prefs: SearchPreferences) -> list[str]:
+    """Generate multiple search queries from profile for broader coverage."""
+    queries = []
+    # Primary: user-supplied keywords
+    if prefs.keywords:
+        queries.append(" ".join(prefs.keywords[:3]))
+    # Target title combinations
+    for title in profile.target_titles[:3]:
+        queries.append(title)
+    # Title + top skill
+    if profile.target_titles and profile.skills:
+        queries.append(f"{profile.target_titles[0]} {profile.skills[0]}")
+    # Current title
+    if profile.current_title and profile.current_title not in queries:
+        queries.append(profile.current_title)
+    # Deduplicate, keep first 4
+    seen, unique = set(), []
+    for q in queries:
+        if q.lower() not in seen:
+            seen.add(q.lower())
+            unique.append(q)
+    return unique[:4]
 
 
 class BaseScraper(ABC):
@@ -41,15 +110,111 @@ class BaseScraper(ABC):
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         pass
 
-    def _build_query(self, profile: CVProfile, prefs: SearchPreferences) -> str:
-        terms = []
+    def _primary_query(self, profile: CVProfile, prefs: SearchPreferences) -> str:
         if prefs.keywords:
-            terms.extend(prefs.keywords[:3])
-        elif profile.target_titles:
-            terms.extend(profile.target_titles[:2])
-        if not terms and profile.current_title:
-            terms.append(profile.current_title)
-        return " ".join(terms)
+            return " ".join(prefs.keywords[:3])
+        if profile.target_titles:
+            return profile.target_titles[0]
+        return profile.current_title
+
+
+# ── Scrapers ──────────────────────────────────────────────────────────────────
+
+class LinkedInScraper(BaseScraper):
+    """Scrapes LinkedIn public job search (no login required)."""
+    name = "LinkedIn"
+
+    # f_WT=2 = remote, f_TPR = time posted, f_JT=F = full-time
+    BASE = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+
+    def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
+        jobs = []
+        queries = _build_queries(profile, prefs)
+        days = prefs.max_days_old
+        # LinkedIn time filter: r86400=1d, r604800=1w, r2592000=1mo
+        tpr = "r86400" if days <= 1 else "r604800" if days <= 7 else "r2592000"
+
+        for query in queries[:3]:
+            try:
+                jobs.extend(self._fetch_page(query, tpr, start=0))
+                jobs.extend(self._fetch_page(query, tpr, start=25))
+            except Exception as e:
+                logger.warning(f"LinkedIn query '{query}' failed: {e}")
+
+        # Also try the standard search page for more results
+        for query in queries[:2]:
+            try:
+                jobs.extend(self._fetch_search_page(query, tpr))
+            except Exception as e:
+                logger.warning(f"LinkedIn search page '{query}' failed: {e}")
+
+        deduped = {j.url: j for j in jobs if j.url}.values()
+        result = [j for j in deduped if _is_recent(j.posted_date, days)]
+        logger.info(f"LinkedIn: found {len(result)} jobs")
+        return list(result)[:40]
+
+    def _fetch_page(self, query: str, tpr: str, start: int) -> list[JobListing]:
+        params = {
+            "keywords": query,
+            "location": "Worldwide",
+            "f_WT": "2",
+            "f_TPR": tpr,
+            "f_JT": "F",
+            "start": start,
+        }
+        url = f"https://www.linkedin.com/jobs/search/?{urlencode(params)}"
+        resp = _get(url, extra_headers={"Accept": "text/html"})
+        if resp.status_code != 200:
+            return []
+        return self._parse_jobs(resp.text)
+
+    def _fetch_search_page(self, query: str, tpr: str) -> list[JobListing]:
+        params = {
+            "keywords": query,
+            "location": "Worldwide",
+            "f_WT": "2",
+            "f_TPR": tpr,
+        }
+        url = f"https://www.linkedin.com/jobs/search/?{urlencode(params)}"
+        resp = _get(url, extra_headers={"Accept": "text/html"})
+        if resp.status_code != 200:
+            return []
+        return self._parse_jobs(resp.text)
+
+    def _parse_jobs(self, html: str) -> list[JobListing]:
+        soup = _soup(html)
+        jobs = []
+        cards = soup.select("div.base-card, li.jobs-search-results__list-item, div.job-search-card")
+        for card in cards:
+            try:
+                title_el = card.select_one("h3.base-search-card__title, h3, .job-search-card__title")
+                company_el = card.select_one("h4.base-search-card__subtitle, h4, .job-search-card__company-name")
+                location_el = card.select_one("span.job-search-card__location, .job-search-card__location")
+                link_el = card.select_one("a.base-card__full-link, a[href*='/jobs/view/']")
+                time_el = card.select_one("time")
+
+                title = title_el.get_text(strip=True) if title_el else ""
+                company = company_el.get_text(strip=True) if company_el else ""
+                location = location_el.get_text(strip=True) if location_el else "Remote"
+                url = link_el["href"].split("?")[0] if link_el and link_el.get("href") else ""
+                posted = time_el.get("datetime", "") if time_el else ""
+
+                if not title or not url:
+                    continue
+
+                jobs.append(JobListing(
+                    title=title,
+                    company=company,
+                    location=location,
+                    url=url,
+                    source=self.name,
+                    job_type="full-time",
+                    posted_date=posted,
+                    apply_url=url,
+                ))
+            except Exception:
+                continue
+        return jobs
 
 
 class RemoteOKScraper(BaseScraper):
@@ -63,43 +228,38 @@ class RemoteOKScraper(BaseScraper):
             if resp.status_code != 200:
                 return jobs
             data = resp.json()
-            # First item is a legal notice
             listings = [d for d in data if isinstance(d, dict) and d.get("position")]
-            query_terms = self._build_query(profile, prefs).lower().split()
-            skill_terms = [s.lower() for s in profile.skills[:15]]
+            queries = _build_queries(profile, prefs)
+            query_words = set(" ".join(queries).lower().split())
+            skill_words = {s.lower() for s in profile.skills[:15]}
+            signal = query_words | skill_words
 
             for item in listings:
                 title = item.get("position", "")
                 company = item.get("company", "")
                 url = item.get("url", "") or f"https://remoteok.com/l/{item.get('id', '')}"
-                description = item.get("description", "")
+                description = _clean_html(item.get("description", ""))[:1500]
                 tags = item.get("tags", []) or []
                 salary = ""
                 if item.get("salary_min") and item.get("salary_max"):
                     salary = f"${item['salary_min']:,} - ${item['salary_max']:,}"
-                date = item.get("date", "")
+                posted = item.get("date", "")[:10] if item.get("date") else ""
 
-                # Relevance filter: title or tags must match query terms or skills
+                if not _is_recent(posted, prefs.max_days_old):
+                    continue
                 combined = (title + " " + " ".join(tags)).lower()
-                if not any(t in combined for t in query_terms + skill_terms):
+                if not any(w in combined for w in signal):
                     continue
 
                 jobs.append(JobListing(
-                    title=title,
-                    company=company,
-                    location="Remote",
-                    url=url,
-                    source=self.name,
-                    description=_clean_html(description)[:1500],
-                    salary=salary,
-                    job_type="full-time",
-                    posted_date=date[:10] if date else "",
-                    tags=tags,
-                    apply_url=url,
+                    title=title, company=company, location="Remote",
+                    url=url, source=self.name, description=description,
+                    salary=salary, job_type="full-time", posted_date=posted,
+                    tags=tags, apply_url=url,
                 ))
             logger.info(f"RemoteOK: found {len(jobs)} jobs")
         except Exception as e:
-            logger.warning(f"RemoteOK scraper error: {e}")
+            logger.warning(f"RemoteOK error: {e}")
         return jobs[:30]
 
 
@@ -112,45 +272,42 @@ class WeWorkRemotelyScraper(BaseScraper):
         "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss",
         "https://weworkremotely.com/categories/remote-design-jobs.rss",
         "https://weworkremotely.com/categories/remote-product-jobs.rss",
-        "https://weworkremotely.com/categories/remote-marketing-jobs.rss",
-        "https://weworkremotely.com/categories/remote-sales-jobs.rss",
         "https://weworkremotely.com/categories/remote-data-science-jobs.rss",
         "https://weworkremotely.com/remote-jobs.rss",
     ]
 
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
-        query_terms = self._build_query(profile, prefs).lower().split()
-        skill_terms = [s.lower() for s in profile.skills[:10]]
+        queries = _build_queries(profile, prefs)
+        query_words = set(" ".join(queries).lower().split())
+        skill_words = {s.lower() for s in profile.skills[:10]}
+        signal = query_words | skill_words
 
         for feed_url in self.FEEDS:
             try:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries:
                     title = entry.get("title", "")
-                    company = _extract_wwr_company(title)
-                    clean_title = _extract_wwr_title(title)
                     url = entry.get("link", "")
                     summary = _clean_html(entry.get("summary", ""))[:1500]
-                    date = entry.get("published", "")
+                    published = entry.get("published", "")
 
+                    if not _is_recent(published, prefs.max_days_old):
+                        continue
                     combined = (title + " " + summary[:200]).lower()
-                    if not any(t in combined for t in query_terms + skill_terms):
+                    if not any(w in combined for w in signal):
                         continue
 
                     jobs.append(JobListing(
-                        title=clean_title,
-                        company=company,
+                        title=_extract_wwr_title(title),
+                        company=_extract_wwr_company(title),
                         location="Remote",
-                        url=url,
-                        source=self.name,
-                        description=summary,
-                        job_type="full-time",
-                        posted_date=date[:16] if date else "",
+                        url=url, source=self.name, description=summary,
+                        job_type="full-time", posted_date=published[:16],
                         apply_url=url,
                     ))
             except Exception as e:
-                logger.warning(f"WWR feed {feed_url} error: {e}")
+                logger.warning(f"WWR feed error: {e}")
 
         logger.info(f"WeWorkRemotely: found {len(jobs)} jobs")
         return jobs[:30]
@@ -162,48 +319,38 @@ class RemotiveScraper(BaseScraper):
 
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
-        query = self._build_query(profile, prefs)
-        try:
-            url = f"https://remotive.com/api/remote-jobs?search={quote_plus(query)}&limit=50"
-            resp = _get(url, timeout=20)
-            if resp.status_code != 200:
-                return jobs
-            data = resp.json().get("jobs", [])
-            skill_terms = [s.lower() for s in profile.skills[:10]]
+        queries = _build_queries(profile, prefs)
 
-            for item in data:
-                title = item.get("title", "")
-                company = item.get("company_name", "")
-                url = item.get("url", "")
-                description = _clean_html(item.get("description", ""))[:1500]
-                salary = item.get("salary", "")
-                tags = item.get("tags", [])
-                date = item.get("publication_date", "")
-
-                # Secondary filter on skills
-                combined = (title + " " + " ".join(tags) + " " + description[:200]).lower()
-                if skill_terms and not any(s in combined for s in skill_terms):
-                    # Still include if title matches query
-                    if not any(t in title.lower() for t in query.lower().split()):
+        for query in queries[:3]:
+            try:
+                url = f"https://remotive.com/api/remote-jobs?search={quote_plus(query)}&limit=50"
+                resp = _get(url)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json().get("jobs", [])
+                for item in data:
+                    posted = item.get("publication_date", "")[:10]
+                    if not _is_recent(posted, prefs.max_days_old):
                         continue
+                    jobs.append(JobListing(
+                        title=item.get("title", ""),
+                        company=item.get("company_name", ""),
+                        location=item.get("candidate_required_location", "Remote"),
+                        url=item.get("url", ""),
+                        source=self.name,
+                        description=_clean_html(item.get("description", ""))[:1500],
+                        salary=item.get("salary", ""),
+                        job_type=item.get("job_type", "full-time"),
+                        posted_date=posted,
+                        tags=item.get("tags", []),
+                        apply_url=item.get("url", ""),
+                    ))
+            except Exception as e:
+                logger.warning(f"Remotive error: {e}")
 
-                jobs.append(JobListing(
-                    title=title,
-                    company=company,
-                    location=item.get("candidate_required_location", "Remote"),
-                    url=url,
-                    source=self.name,
-                    description=description,
-                    salary=salary,
-                    job_type=item.get("job_type", "full-time"),
-                    posted_date=date[:10] if date else "",
-                    tags=tags,
-                    apply_url=url,
-                ))
-            logger.info(f"Remotive: found {len(jobs)} jobs")
-        except Exception as e:
-            logger.warning(f"Remotive scraper error: {e}")
-        return jobs[:30]
+        deduped = list({j.url: j for j in jobs}.values())
+        logger.info(f"Remotive: found {len(deduped)} jobs")
+        return deduped[:40]
 
 
 class JobicyScraper(BaseScraper):
@@ -213,45 +360,92 @@ class JobicyScraper(BaseScraper):
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
         try:
-            resp = _get("https://jobicy.com/api/v2/remote-jobs?count=50", timeout=20)
+            resp = _get("https://jobicy.com/api/v2/remote-jobs?count=50&geo=anywhere")
             if resp.status_code != 200:
                 return jobs
             data = resp.json().get("jobs", [])
-            query_terms = self._build_query(profile, prefs).lower().split()
-            skill_terms = [s.lower() for s in profile.skills[:10]]
+            queries = _build_queries(profile, prefs)
+            signal = set(" ".join(queries).lower().split()) | {s.lower() for s in profile.skills[:10]}
 
             for item in data:
-                title = item.get("jobTitle", "")
-                company = item.get("companyName", "")
-                url = item.get("url", "")
-                description = _clean_html(item.get("jobDescription", ""))[:1500]
-                salary = item.get("annualSalaryMin", "")
-                if salary and item.get("annualSalaryMax"):
-                    salary = f"${salary:,} - ${item['annualSalaryMax']:,}"
-                tags = item.get("jobIndustry", []) + item.get("jobType", [])
-                date = item.get("pubDate", "")
-
-                combined = (title + " " + description[:300]).lower()
-                if not any(t in combined for t in query_terms + skill_terms):
+                posted = str(item.get("pubDate", ""))[:10]
+                if not _is_recent(posted, prefs.max_days_old):
                     continue
-
+                title = item.get("jobTitle", "")
+                desc = _clean_html(item.get("jobDescription", ""))[:1500]
+                combined = (title + " " + desc[:300]).lower()
+                if not any(w in combined for w in signal):
+                    continue
+                salary = ""
+                if item.get("annualSalaryMin") and item.get("annualSalaryMax"):
+                    salary = f"${item['annualSalaryMin']:,} - ${item['annualSalaryMax']:,}"
                 jobs.append(JobListing(
                     title=title,
-                    company=company,
+                    company=item.get("companyName", ""),
                     location=item.get("jobGeo", "Remote"),
-                    url=url,
+                    url=item.get("url", ""),
                     source=self.name,
-                    description=description,
-                    salary=str(salary) if salary else "",
+                    description=desc,
+                    salary=salary,
                     job_type=", ".join(item.get("jobType", [])),
-                    posted_date=str(date)[:10] if date else "",
-                    tags=tags,
-                    apply_url=url,
+                    posted_date=posted,
+                    tags=item.get("jobIndustry", []) + item.get("jobType", []),
+                    apply_url=item.get("url", ""),
                 ))
             logger.info(f"Jobicy: found {len(jobs)} jobs")
         except Exception as e:
-            logger.warning(f"Jobicy scraper error: {e}")
-        return jobs[:20]
+            logger.warning(f"Jobicy error: {e}")
+        return jobs[:25]
+
+
+class IndeedRSSScraper(BaseScraper):
+    """Scrapes Indeed via RSS feed (remote, sorted by date)."""
+    name = "Indeed"
+
+    def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
+        jobs = []
+        queries = _build_queries(profile, prefs)
+        days = prefs.max_days_old
+        fromage = min(days, 14)  # Indeed supports max 14
+
+        for query in queries[:3]:
+            try:
+                params = {
+                    "q": query,
+                    "l": "remote",
+                    "sort": "date",
+                    "fromage": fromage,
+                    "limit": 50,
+                }
+                url = "https://www.indeed.com/rss?" + urlencode(params)
+                feed = feedparser.parse(url)
+                for entry in feed.entries:
+                    title = entry.get("title", "")
+                    link = entry.get("link", "")
+                    summary = _clean_html(entry.get("summary", ""))[:1500]
+                    published = entry.get("published", "")
+                    company = entry.get("author", "") or _extract_indeed_company(title)
+
+                    if not _is_recent(published, days):
+                        continue
+
+                    jobs.append(JobListing(
+                        title=_extract_indeed_title(title),
+                        company=company,
+                        location="Remote",
+                        url=link,
+                        source=self.name,
+                        description=summary,
+                        job_type="full-time",
+                        posted_date=published[:16] if published else "",
+                        apply_url=link,
+                    ))
+            except Exception as e:
+                logger.warning(f"Indeed RSS error for '{query}': {e}")
+
+        deduped = list({j.url: j for j in jobs}.values())
+        logger.info(f"Indeed: found {len(deduped)} jobs")
+        return deduped[:40]
 
 
 class HNHiringParser(BaseScraper):
@@ -261,61 +455,66 @@ class HNHiringParser(BaseScraper):
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
         try:
-            # Get the latest "Ask HN: Who is hiring?" post
-            search_url = "https://hn.algolia.com/api/v1/search?query=Ask+HN+Who+is+hiring&tags=ask_hn&numericFilters=points>100"
-            resp = _get(search_url, timeout=15)
+            search_url = (
+                "https://hn.algolia.com/api/v1/search"
+                "?query=Ask+HN+Who+is+hiring&tags=ask_hn&numericFilters=points>100"
+            )
+            resp = _get(search_url)
             if resp.status_code != 200:
                 return jobs
 
             hits = resp.json().get("hits", [])
-            hiring_post = None
-            for hit in hits:
-                if "who is hiring" in hit.get("title", "").lower():
-                    hiring_post = hit
-                    break
-
+            hiring_post = next(
+                (h for h in hits if "who is hiring" in h.get("title", "").lower()), None
+            )
             if not hiring_post:
                 return jobs
 
             post_id = hiring_post["objectID"]
-            comments_url = f"https://hn.algolia.com/api/v1/search?tags=comment,story_{post_id}&hitsPerPage=100"
-            resp = _get(comments_url, timeout=15)
+            comments_url = (
+                f"https://hn.algolia.com/api/v1/search"
+                f"?tags=comment,story_{post_id}&hitsPerPage=200"
+            )
+            resp = _get(comments_url)
             if resp.status_code != 200:
                 return jobs
 
-            comments = resp.json().get("hits", [])
-            query_terms = self._build_query(profile, prefs).lower().split()
-            skill_terms = [s.lower() for s in profile.skills[:10]]
+            queries = _build_queries(profile, prefs)
+            signal = set(" ".join(queries).lower().split()) | {s.lower() for s in profile.skills[:10]}
 
-            for comment in comments:
-                text = comment.get("comment_text", "") or ""
-                clean_text = _clean_html(text)
-                combined = clean_text.lower()
-
-                if not any(t in combined for t in query_terms + skill_terms):
+            for comment in resp.json().get("hits", []):
+                text = _clean_html(comment.get("comment_text", "") or "")
+                if len(text) < 50:
                     continue
-                if len(clean_text) < 50:
+                # Remote filter
+                if prefs.remote_only and not any(
+                    w in text.lower()[:300] for w in ["remote", "anywhere", "worldwide"]
+                ):
+                    continue
+                if not any(w in text.lower() for w in signal):
                     continue
 
-                # Extract company and title from first line
-                first_line = clean_text.split("\n")[0][:100]
-                comment_url = f"https://news.ycombinator.com/item?id={comment.get('objectID', '')}"
+                created = comment.get("created_at", "")
+                if not _is_recent(created, prefs.max_days_old * 30):  # HN thread is monthly
+                    continue
 
+                first_line = text.split("\n")[0][:120]
+                cid = comment.get("objectID", "")
+                url = f"https://news.ycombinator.com/item?id={cid}"
                 jobs.append(JobListing(
                     title=first_line,
                     company=_extract_hn_company(first_line),
-                    location=_extract_hn_location(clean_text),
-                    url=comment_url,
-                    source=self.name,
-                    description=clean_text[:1500],
-                    job_type=_extract_hn_type(clean_text),
-                    apply_url=comment_url,
+                    location=_extract_hn_location(text),
+                    url=url, source=self.name,
+                    description=text[:1500],
+                    job_type=_extract_hn_type(text),
+                    apply_url=url,
                 ))
 
             logger.info(f"HackerNews: found {len(jobs)} jobs")
         except Exception as e:
-            logger.warning(f"HN scraper error: {e}")
-        return jobs[:20]
+            logger.warning(f"HN error: {e}")
+        return jobs[:25]
 
 
 class ArbeitNowScraper(BaseScraper):
@@ -324,50 +523,40 @@ class ArbeitNowScraper(BaseScraper):
 
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
-        query = self._build_query(profile, prefs)
-        try:
-            params = {"search": query, "page": 1}
-            if prefs.remote_only:
-                params["remote"] = "true"
-            url = "https://www.arbeitnow.com/api/job-board-api?" + urlencode(params)
-            resp = _get(url, timeout=20)
-            if resp.status_code != 200:
-                return jobs
-            data = resp.json().get("data", [])
-            skill_terms = [s.lower() for s in profile.skills[:10]]
+        queries = _build_queries(profile, prefs)
 
-            for item in data:
-                title = item.get("title", "")
-                company = item.get("company_name", "")
-                url = item.get("url", "")
-                description = _clean_html(item.get("description", ""))[:1500]
-                tags = item.get("tags", [])
-                date = item.get("created_at", "")
-                location = item.get("location", "")
-                if item.get("remote"):
-                    location = "Remote" + (f" / {location}" if location else "")
-
-                combined = (title + " " + " ".join(tags) + " " + description[:300]).lower()
-                if skill_terms and not any(s in combined for s in skill_terms):
-                    if not any(t in title.lower() for t in query.lower().split()):
+        for query in queries[:2]:
+            try:
+                params = {"search": query, "page": 1, "remote": "true"}
+                url = "https://www.arbeitnow.com/api/job-board-api?" + urlencode(params)
+                resp = _get(url)
+                if resp.status_code != 200:
+                    continue
+                for item in resp.json().get("data", []):
+                    posted = str(item.get("created_at", ""))[:10]
+                    if not _is_recent(posted, prefs.max_days_old):
                         continue
+                    loc = item.get("location", "")
+                    if item.get("remote"):
+                        loc = "Remote" + (f" / {loc}" if loc else "")
+                    jobs.append(JobListing(
+                        title=item.get("title", ""),
+                        company=item.get("company_name", ""),
+                        location=loc or "Remote",
+                        url=item.get("url", ""),
+                        source=self.name,
+                        description=_clean_html(item.get("description", ""))[:1500],
+                        job_type="full-time",
+                        posted_date=posted,
+                        tags=item.get("tags", []),
+                        apply_url=item.get("url", ""),
+                    ))
+            except Exception as e:
+                logger.warning(f"ArbeitNow error: {e}")
 
-                jobs.append(JobListing(
-                    title=title,
-                    company=company,
-                    location=location,
-                    url=url,
-                    source=self.name,
-                    description=description,
-                    job_type="full-time",
-                    posted_date=str(date)[:10] if date else "",
-                    tags=tags,
-                    apply_url=url,
-                ))
-            logger.info(f"ArbeitNow: found {len(jobs)} jobs")
-        except Exception as e:
-            logger.warning(f"ArbeitNow scraper error: {e}")
-        return jobs[:20]
+        deduped = list({j.url: j for j in jobs}.values())
+        logger.info(f"ArbeitNow: found {len(deduped)} jobs")
+        return deduped[:25]
 
 
 class TheMuseScraper(BaseScraper):
@@ -376,84 +565,79 @@ class TheMuseScraper(BaseScraper):
 
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
-        query = self._build_query(profile, prefs)
-        try:
-            params = {"category": query, "page": 1, "descending": "true"}
-            url = "https://www.themuse.com/api/public/jobs?" + urlencode(params)
-            resp = _get(url, timeout=20)
-            if resp.status_code != 200:
-                return jobs
-            data = resp.json().get("results", [])
-            skill_terms = [s.lower() for s in profile.skills[:10]]
-            query_terms = query.lower().split()
+        queries = _build_queries(profile, prefs)
 
-            for item in data:
-                title = item.get("name", "")
-                company = item.get("company", {}).get("name", "")
-                refs = item.get("refs", {})
-                landing_url = refs.get("landing_page", "")
-                levels = [l.get("name", "") for l in item.get("levels", [])]
-                locations = item.get("locations", [])
-                loc_str = ", ".join(l.get("name", "") for l in locations) or "Unknown"
-                categories = [c.get("name", "") for c in item.get("categories", [])]
-                published = item.get("publication_date", "")
-
-                combined = (title + " " + " ".join(categories)).lower()
-                if not any(t in combined for t in query_terms):
+        for query in queries[:2]:
+            try:
+                params = {"category": query, "page": 1, "descending": "true"}
+                url = "https://www.themuse.com/api/public/jobs?" + urlencode(params)
+                resp = _get(url)
+                if resp.status_code != 200:
                     continue
+                query_words = set(query.lower().split())
+                for item in resp.json().get("results", []):
+                    published = item.get("publication_date", "")
+                    if not _is_recent(published, prefs.max_days_old):
+                        continue
+                    title = item.get("name", "")
+                    if not any(w in title.lower() for w in query_words):
+                        continue
+                    locations = item.get("locations", [])
+                    # Remote filter
+                    if prefs.remote_only:
+                        loc_names = [l.get("name", "").lower() for l in locations]
+                        if not any("remote" in l or "anywhere" in l for l in loc_names):
+                            continue
+                    loc_str = ", ".join(l.get("name", "") for l in locations) or "Remote"
+                    refs = item.get("refs", {})
+                    landing = refs.get("landing_page", "")
+                    cats = [c.get("name", "") for c in item.get("categories", [])]
+                    jobs.append(JobListing(
+                        title=title,
+                        company=item.get("company", {}).get("name", ""),
+                        location=loc_str,
+                        url=landing, source=self.name,
+                        description=f"Categories: {', '.join(cats)}",
+                        job_type="full-time",
+                        posted_date=published[:10],
+                        tags=cats, apply_url=landing,
+                    ))
+            except Exception as e:
+                logger.warning(f"TheMuse error: {e}")
 
-                jobs.append(JobListing(
-                    title=title,
-                    company=company,
-                    location=loc_str,
-                    url=landing_url,
-                    source=self.name,
-                    description=f"Level: {', '.join(levels)}. Categories: {', '.join(categories)}",
-                    job_type="full-time",
-                    posted_date=published[:10] if published else "",
-                    tags=categories,
-                    apply_url=landing_url,
-                ))
-            logger.info(f"TheMuse: found {len(jobs)} jobs")
-        except Exception as e:
-            logger.warning(f"TheMuse scraper error: {e}")
-        return jobs[:15]
+        deduped = list({j.url: j for j in jobs}.values())
+        logger.info(f"TheMuse: found {len(deduped)} jobs")
+        return deduped[:15]
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _clean_html(html: str) -> str:
-    """Strip HTML tags and clean whitespace."""
-    soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(separator="\n")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_wwr_company(title: str) -> str:
     parts = title.split(" at ", 1)
     return parts[1].strip() if len(parts) > 1 else ""
 
-
 def _extract_wwr_title(title: str) -> str:
     parts = title.split(" at ", 1)
     return parts[0].strip() if parts else title
 
+def _extract_indeed_title(title: str) -> str:
+    # "Job Title - Company Name" or "Job Title"
+    return title.split(" - ")[0].strip()
+
+def _extract_indeed_company(title: str) -> str:
+    parts = title.split(" - ")
+    return parts[-1].strip() if len(parts) > 1 else ""
 
 def _extract_hn_company(first_line: str) -> str:
-    # Format: "Company | Role | Location"
     parts = first_line.split("|")
     return parts[0].strip() if parts else first_line
 
-
 def _extract_hn_location(text: str) -> str:
-    remote_patterns = ["remote", "anywhere", "worldwide", "global"]
     lower = text.lower()[:300]
-    for p in remote_patterns:
+    for p in ["remote", "anywhere", "worldwide", "global"]:
         if p in lower:
             return "Remote"
     return "Unknown"
-
 
 def _extract_hn_type(text: str) -> str:
     lower = text.lower()[:200]
@@ -465,9 +649,11 @@ def _extract_hn_type(text: str) -> str:
 
 
 ALL_SCRAPERS: list[BaseScraper] = [
+    LinkedInScraper(),
     RemoteOKScraper(),
     WeWorkRemotelyScraper(),
     RemotiveScraper(),
+    IndeedRSSScraper(),
     JobicyScraper(),
     HNHiringParser(),
     ArbeitNowScraper(),
@@ -480,7 +666,7 @@ def scrape_all(
     prefs: SearchPreferences,
     sources: list[str] | None = None,
 ) -> list[JobListing]:
-    """Run all scrapers and return deduplicated results."""
+    """Run all scrapers and return deduplicated, date-filtered results."""
     scrapers = ALL_SCRAPERS
     if sources:
         scrapers = [s for s in ALL_SCRAPERS if s.name.lower() in [x.lower() for x in sources]]
@@ -494,11 +680,10 @@ def scrape_all(
             logger.warning(f"Scraper {scraper.name} failed: {e}")
 
     # Deduplicate by URL
-    seen = set()
-    deduped = []
+    seen, deduped = set(), []
     for job in all_jobs:
         key = job.url.rstrip("/")
-        if key not in seen:
+        if key and key not in seen:
             seen.add(key)
             deduped.append(job)
 

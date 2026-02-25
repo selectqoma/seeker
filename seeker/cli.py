@@ -54,11 +54,13 @@ def _get_client() -> anthropic.Anthropic:
 @app.command()
 def search(
     cv: str = typer.Argument(..., help="Path to your CV (PDF or .txt file)"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Remote-only jobs"),
+    remote: bool = typer.Option(True, "--remote/--no-remote", "-r", help="Remote-only jobs (default: on)"),
+    days: int = typer.Option(14, "--days", "-d", help="Only show jobs posted in the last N days"),
     location: Optional[str] = typer.Option(None, "--location", "-l", help="Target location(s), comma-separated"),
     keywords: Optional[str] = typer.Option(None, "--keywords", "-k", help="Extra keywords, comma-separated"),
     exclude: Optional[str] = typer.Option(None, "--exclude", "-x", help="Keywords to exclude"),
     top: int = typer.Option(20, "--top", "-n", help="Number of top results to show"),
+    min_score: float = typer.Option(50.0, "--min-score", "-m", help="Minimum match score (0-100) to include"),
     sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated scrapers to use"),
     export: Optional[str] = typer.Option(None, "--export", "-e", help="Export results to JSON file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug logs"),
@@ -93,7 +95,7 @@ def search(
     _print_profile(profile)
 
     # ── Step 2: Build preferences ─────────────────────────────────────────────
-    user_prefs: dict = {"remote_only": remote}
+    user_prefs: dict = {"remote_only": remote, "max_days_old": days}
     if location:
         user_prefs["locations"] = [l.strip() for l in location.split(",")]
     if keywords:
@@ -142,7 +144,7 @@ def search(
         transient=True,
     ) as progress:
         progress.add_task(f"Scoring {len(jobs)} jobs with AI (parallel)...", total=None)
-        ranked = rank_jobs(jobs, profile, prefs, client, top_n=top)
+        ranked = rank_jobs(jobs, profile, prefs, client, top_n=top, min_score=min_score)
 
     console.print(f"[bold green]✓[/bold green] Scored and ranked [bold]{len(ranked)}[/bold] top matches.\n")
 
@@ -177,9 +179,11 @@ def sources():
     table.add_column("Description")
 
     info = {
+        "LinkedIn": ("HTML scraper", "LinkedIn public job search (no login, remote filter)"),
         "RemoteOK": ("JSON API", "Remote jobs via RemoteOK.com API"),
-        "WeWorkRemotely": ("RSS Feeds", "Remote jobs in 8 categories via RSS"),
+        "WeWorkRemotely": ("RSS Feeds", "Remote jobs via RSS (6 categories)"),
         "Remotive": ("JSON API", "Remote jobs via Remotive.com API"),
+        "Indeed": ("RSS Feed", "Indeed remote jobs sorted by date"),
         "Jobicy": ("JSON API", "Remote jobs via Jobicy.com API"),
         "HackerNews": ("HN API", "Latest 'Who is Hiring?' Hacker News thread"),
         "ArbeitNow": ("JSON API", "Remote + EU tech jobs via ArbeitNow API"),
