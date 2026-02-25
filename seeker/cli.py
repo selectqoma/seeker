@@ -18,7 +18,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.text import Text
 
-from .cv_parser import load_cv_text, parse_cv, build_search_preferences
+from .cv_parser import load_cv_text, parse_cv, build_search_preferences, prompt_candidate_wishes
 from .models import CVProfile, SearchPreferences, JobListing
 from .scrapers import scrape_all, ALL_SCRAPERS
 from .matcher import rank_jobs, generate_summary
@@ -95,14 +95,17 @@ def search(
 
     _print_profile(profile)
 
-    # ── Step 2: Build preferences ─────────────────────────────────────────────
-    user_prefs: dict = {"remote_only": remote, "max_days_old": days}
+    # ── Step 2: Candidate wishes prompt ──────────────────────────────────────
+    wishes = prompt_candidate_wishes(profile)
+
+    # ── Step 3: Build preferences ─────────────────────────────────────────────
+    user_prefs: dict = {"remote_only": remote, "max_days_old": days, "wishes": wishes}
     if location:
         user_prefs["locations"] = [l.strip() for l in location.split(",")]
     if keywords:
-        user_prefs["keywords"] = [k.strip() for k in keywords.split(",")]
+        wishes["target_roles"] = [k.strip() for k in keywords.split(",")]
     if exclude:
-        user_prefs["excluded_keywords"] = [e.strip() for e in exclude.split(",")]
+        wishes["excluded_keywords"] += [e.strip() for e in exclude.split(",")]
 
     prefs = build_search_preferences(profile, user_prefs)
     selected_sources = [s.strip() for s in sources.split(",")] if sources else None

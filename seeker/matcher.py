@@ -12,13 +12,16 @@ from .models import CVProfile, SearchPreferences, JobListing
 logger = logging.getLogger(__name__)
 
 # Compact schema — short responses = no truncation
-SCORE_PROMPT = """Candidate: {current_title}, {years_experience}y exp, skills: {skills}, targets: {target_titles}
+SCORE_PROMPT = """Candidate: {current_title}, {years_experience}y exp ({seniority_level} level), skills: {skills}
+Seeking: {target_roles}
+Notes: {extra_notes}
 
-Job: {title} @ {company} ({location})
+Job: {title} @ {company} ({location}) [remote scope: {remote_scope}]
 Tags: {tags}
 Description: {description}
 
-Score 0-100 fit. Return ONLY this JSON (keep strings under 80 chars):
+Score 0-100 fit. Be honest — penalise heavily if the job requires more seniority than the candidate has.
+Return ONLY this JSON (keep strings under 80 chars):
 {{"score":<int>,"fit":"one sentence why good fit","gap":"main concern or none"}}"""
 
 
@@ -58,15 +61,24 @@ def _parse_score_response(raw: str) -> dict:
         raise
 
 
-def _score_job(job: JobListing, profile: CVProfile, client: anthropic.Anthropic) -> JobListing:
+def _score_job(
+    job: JobListing,
+    profile: CVProfile,
+    prefs: SearchPreferences,
+    client: anthropic.Anthropic,
+) -> JobListing:
+    from .cv_parser import _infer_level
     prompt = SCORE_PROMPT.format(
         current_title=profile.current_title,
         years_experience=profile.years_experience,
+        seniority_level=_infer_level(profile.years_experience),
         skills=", ".join(profile.skills[:12]),
-        target_titles=", ".join(profile.target_titles),
+        target_roles=", ".join(prefs.target_roles or profile.target_titles),
+        extra_notes=prefs.extra_notes or "none",
         title=job.title,
         company=job.company,
         location=job.location,
+        remote_scope=job.remote_scope or "unknown",
         tags=", ".join(job.tags[:6]),
         description=job.description[:300],
     )
@@ -140,7 +152,7 @@ def rank_jobs(
 
     scored = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_score_job, job, profile, client): job for job in jobs}
+        futures = {executor.submit(_score_job, job, profile, prefs, client): job for job in jobs}
         for future in as_completed(futures):
             try:
                 scored.append(future.result())

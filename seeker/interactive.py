@@ -37,9 +37,11 @@ def _print_job_card(job: JobListing, rank: int) -> None:
     style = _score_style(job.match_score)
     bar = _score_bar(job.match_score)
 
+    scope_color = "green" if job.remote_scope == "Worldwide" else "yellow" if job.remote_scope not in ("", "Unspecified") else "dim"
     lines = [
         f"[bold]{job.title}[/bold]  @  [cyan]{job.company}[/cyan]",
-        f"[dim]{job.location}[/dim]" + (f"  |  [bold green]{job.salary}[/bold green]" if job.salary else ""),
+        f"[dim]{job.location}[/dim]  [{scope_color}]({job.remote_scope or 'Remote'})[/{scope_color}]"
+        + (f"  |  [bold green]{job.salary}[/bold green]" if job.salary else ""),
         f"[{style}]{bar}  {job.match_score:.0f}/100[/{style}]  "
         f"[dim]{job.source}  {job.posted_date}[/dim]",
     ]
@@ -60,8 +62,10 @@ def _print_job_card(job: JobListing, rank: int) -> None:
 def _print_full_job(job: JobListing, rank: int) -> None:
     style = _score_style(job.match_score)
     console.print(Rule(f"[bold]#{rank} — {job.title} @ {job.company}[/bold]", style=style))
+    scope_color = "green" if job.remote_scope == "Worldwide" else "yellow" if job.remote_scope not in ("", "Unspecified") else "dim"
     meta = (
-        f"[dim]Location:[/dim] {job.location}  |  "
+        f"[dim]Location:[/dim] {job.location}  "
+        f"[{scope_color}][{job.remote_scope or 'Remote'}][/{scope_color}]  |  "
         f"[dim]Type:[/dim] {job.job_type or 'N/A'}  |  "
         f"[dim]Source:[/dim] {job.source}  |  "
         f"[dim]Posted:[/dim] {job.posted_date or 'unknown'}"

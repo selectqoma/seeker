@@ -79,6 +79,79 @@ def _is_recent(posted_date: str, max_days: int) -> bool:
     return dt >= cutoff
 
 
+def _parse_remote_scope(location: str, description: str = "") -> str:
+    """Classify the remote scope of a job from its location string and description."""
+    combined = (location + " " + description[:300]).lower()
+
+    us_patterns = [
+        "us only", "us-only", "united states only", "usa only",
+        "us residents", "must be in the us", "us based", "based in us",
+        "north america only", "us or canada", "us/canada",
+    ]
+    europe_patterns = [
+        "europe only", "eu only", "europe remote", "remote in europe",
+        "european union", "emea", "cet timezone", "cest", "within europe",
+    ]
+    uk_patterns = ["uk only", "uk remote", "remote uk", "united kingdom only", "based in uk"]
+    canada_patterns = ["canada only", "canada remote", "canadian residents"]
+    australia_patterns = ["australia only", "australia remote", "aus only", "apac"]
+    latam_patterns = ["latam", "latin america", "south america remote"]
+    worldwide_patterns = [
+        "worldwide", "globally", "anywhere in the world", "any country",
+        "all countries", "global remote", "fully remote", "work from anywhere",
+        "location independent",
+    ]
+
+    if any(p in combined for p in us_patterns):
+        return "US only"
+    if any(p in combined for p in uk_patterns):
+        return "UK only"
+    if any(p in combined for p in canada_patterns):
+        return "Canada only"
+    if any(p in combined for p in australia_patterns):
+        return "Australia/APAC"
+    if any(p in combined for p in latam_patterns):
+        return "LATAM"
+    if any(p in combined for p in europe_patterns):
+        return "Europe"
+    if any(p in combined for p in worldwide_patterns):
+        return "Worldwide"
+
+    # If location just says "Remote" with no qualifier, mark as unspecified
+    loc = location.strip().lower()
+    if loc in ("remote", "anywhere", ""):
+        return "Unspecified"
+
+    # Has a specific country/city name — infer it's local remote
+    return f"Remote ({location.strip()})"
+
+
+def _scope_matches_pref(job_scope: str, pref: str) -> bool:
+    """Return True if the job's remote scope is acceptable given candidate preference."""
+    if pref == "worldwide":
+        return True  # accept everything
+    if job_scope in ("Worldwide", "Unspecified"):
+        return True  # globally open or unknown — always include
+
+    pref_lower = pref.lower()
+    scope_lower = job_scope.lower()
+
+    if pref_lower == "europe" and ("europe" in scope_lower or "eu" in scope_lower or "emea" in scope_lower):
+        return True
+    if pref_lower == "us" and "us" in scope_lower:
+        return True
+    if pref_lower == "uk" and "uk" in scope_lower:
+        return True
+    if pref_lower == "canada" and "canada" in scope_lower:
+        return True
+    if pref_lower == "australia" and ("australia" in scope_lower or "apac" in scope_lower):
+        return True
+    # custom region: check substring match
+    if pref_lower in scope_lower:
+        return True
+    return False
+
+
 def _build_queries(profile: CVProfile, prefs: SearchPreferences) -> list[str]:
     """Generate multiple search queries from profile for broader coverage."""
     queries = []
@@ -686,5 +759,17 @@ def scrape_all(
         if key and key not in seen:
             seen.add(key)
             deduped.append(job)
+
+    # Enrich each job with parsed remote scope
+    for job in deduped:
+        job.remote_scope = _parse_remote_scope(job.location, job.description)
+
+    # Filter by candidate's remote scope preference
+    if prefs.remote_scope and prefs.remote_scope != "worldwide":
+        before = len(deduped)
+        deduped = [j for j in deduped if _scope_matches_pref(j.remote_scope, prefs.remote_scope)]
+        dropped = before - len(deduped)
+        if dropped:
+            logger.info(f"Remote scope filter ({prefs.remote_scope}): dropped {dropped} out-of-region jobs")
 
     return deduped

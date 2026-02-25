@@ -24,14 +24,17 @@ class CVProfile:
 class SearchPreferences:
     """User preferences for job search."""
     remote_only: bool = True
+    remote_scope: str = "worldwide"  # worldwide | europe | us | country:<name>
     max_days_old: int = 14
     locations: list[str] = field(default_factory=list)
     min_salary: Optional[int] = None
     max_salary: Optional[int] = None
-    job_types: list[str] = field(default_factory=list)  # full-time, part-time, contract
+    job_types: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     excluded_keywords: list[str] = field(default_factory=list)
     experience_level: str = ""  # junior, mid, senior, lead, principal
+    target_roles: list[str] = field(default_factory=list)
+    extra_notes: str = ""
 
 
 @dataclass
@@ -47,6 +50,7 @@ class JobListing:
     job_type: str = ""
     posted_date: str = ""
     tags: list[str] = field(default_factory=list)
+    remote_scope: str = ""  # Worldwide | Europe | US only | UK only | etc.
     match_score: float = 0.0
     match_reasons: list[str] = field(default_factory=list)
     match_concerns: list[str] = field(default_factory=list)
