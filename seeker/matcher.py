@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Compact schema — short responses = no truncation
 SCORE_PROMPT = """Candidate: {current_title}, {years_experience}y exp ({seniority_level} level), skills: {skills}
+Based in: {country} | Employment type: {employment_type}
 Seeking: {target_roles}
 Notes: {extra_notes}
 
@@ -20,7 +21,12 @@ Job: {title} @ {company} ({location}) [remote scope: {remote_scope}]
 Tags: {tags}
 Description: {description}
 
-Score 0-100 fit. Be honest — penalise heavily if the job requires more seniority than the candidate has.
+Score 0-100. Apply these rules strictly:
+1. Score 0 if the job requires the candidate to be physically located in a country they are not in (e.g. "must reside in US", "US work authorization required", "W-2", no sponsorship) and the candidate is in {country}.
+2. Score 0 if employment_type is "employee" and the job is clearly contractor/1099 only, or vice versa.
+3. Penalise heavily if the role requires significantly more seniority than the candidate has.
+4. Be honest — do not inflate the score.
+
 Return ONLY this JSON (keep strings under 80 chars):
 {{"score":<int>,"fit":"one sentence why good fit","gap":"main concern or none"}}"""
 
@@ -73,12 +79,14 @@ def _score_job(
         years_experience=profile.years_experience,
         seniority_level=_infer_level(profile.years_experience),
         skills=", ".join(profile.skills[:12]),
+        country=prefs.country or profile.location or "unknown",
+        employment_type=prefs.employment_type or "both",
         target_roles=", ".join(prefs.target_roles or profile.target_titles),
         extra_notes=prefs.extra_notes or "none",
         title=job.title,
         company=job.company,
         location=job.location,
-        remote_scope=job.remote_scope or "unknown",
+        remote_scope=job.remote_scope or "Unspecified",
         tags=", ".join(job.tags[:6]),
         description=job.description[:300],
     )

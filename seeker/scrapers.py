@@ -80,76 +80,157 @@ def _is_recent(posted_date: str, max_days: int) -> bool:
 
 
 def _parse_remote_scope(location: str, description: str = "") -> str:
-    """Classify the remote scope of a job from its location string and description."""
-    combined = (location + " " + description[:300]).lower()
+    """Classify the remote scope of a job.
 
-    us_patterns = [
+    Scans both location string and full description for eligibility signals.
+    Errs on the side of flagging US-only when common US hiring patterns appear,
+    since most job boards label US-remote jobs simply as "Remote".
+    """
+    loc = location.strip().lower()
+    # Use full description — eligibility language often appears mid-text
+    desc = description.lower()
+    combined = loc + " " + desc
+
+    # ── Explicit US-only signals (strongest) ─────────────────────────────────
+    us_explicit = [
         "us only", "us-only", "united states only", "usa only",
-        "us residents", "must be in the us", "us based", "based in us",
-        "north america only", "us or canada", "us/canada",
+        "us residents only", "must be in the us", "must reside in the us",
+        "north america only", "remote - us", "us remote", "remote us",
+        "remote (us)", "remote, us", "us, remote",
     ]
+    # Work-auth language that implies US employment
+    us_work_auth = [
+        "authorized to work in the us",
+        "authorized to work in the united states",
+        "must be authorized to work",
+        "us work authorization",
+        "us work authorisation",
+        "eligible to work in the us",
+        "legal right to work in the us",
+        "sponsorship is not available",
+        "we do not sponsor",
+        "no sponsorship",
+        "unable to sponsor",
+        "cannot sponsor",
+        "w-2", "w2 employee", "w2 only",
+        "1099",  # US contractor classification
+        "must be a us citizen",
+        "us citizens and green card",
+        "must reside in the us",
+        "must reside in the united states",
+        "must be located in the us",
+        "must be located in the united states",
+        "must live in the us",
+        "must live in the united states",
+        "based in the united states",
+        "located in the united states",
+    ]
+    # US state mentions in location field (strong signal job is US-based)
+    us_states_in_loc = re.search(
+        r'\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|'
+        r'delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|'
+        r'kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|'
+        r'mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|'
+        r'new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|'
+        r'pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|'
+        r'utah|vermont|virginia|washington|west virginia|wisconsin|wyoming)\b',
+        loc,
+    )
+
+    if any(p in combined for p in us_explicit):
+        return "US only"
+    if any(p in combined for p in us_work_auth):
+        return "US only"
+    if us_states_in_loc:
+        return "US only"
+
+    # ── Other country-specific signals ───────────────────────────────────────
+    uk_patterns = [
+        "uk only", "uk remote", "remote uk", "united kingdom only",
+        "must have right to work in the uk", "right to work in uk",
+        "based in uk", "located in the uk",
+    ]
+    canada_patterns = [
+        "canada only", "canada remote", "canadian residents",
+        "must be in canada", "located in canada",
+    ]
+    australia_patterns = [
+        "australia only", "australia remote", "aus only",
+        "must be in australia", "australian residents",
+    ]
+    latam_patterns = ["latam only", "latin america only", "south america only"]
+
+    # ── EU / Europe-friendly signals ─────────────────────────────────────────
     europe_patterns = [
         "europe only", "eu only", "europe remote", "remote in europe",
-        "european union", "emea", "cet timezone", "cest", "within europe",
-    ]
-    uk_patterns = ["uk only", "uk remote", "remote uk", "united kingdom only", "based in uk"]
-    canada_patterns = ["canada only", "canada remote", "canadian residents"]
-    australia_patterns = ["australia only", "australia remote", "aus only", "apac"]
-    latam_patterns = ["latam", "latin america", "south america remote"]
-    worldwide_patterns = [
-        "worldwide", "globally", "anywhere in the world", "any country",
-        "all countries", "global remote", "fully remote", "work from anywhere",
-        "location independent",
+        "within europe", "eu residents", "emea", "must be in europe",
+        "cet timezone", "cest timezone", "european timezone",
+        "must be based in europe", "located in europe",
     ]
 
-    if any(p in combined for p in us_patterns):
-        return "US only"
+    # ── Worldwide / fully open signals ───────────────────────────────────────
+    worldwide_patterns = [
+        "work from anywhere", "anywhere in the world", "any country",
+        "all countries", "global remote", "location independent",
+        "no location restrictions", "open to candidates worldwide",
+        "worldwide", "globally",
+    ]
+
+    # Worldwide wins over any regional pattern — check it first
+    if any(p in combined for p in worldwide_patterns):
+        return "Worldwide"
     if any(p in combined for p in uk_patterns):
         return "UK only"
     if any(p in combined for p in canada_patterns):
         return "Canada only"
     if any(p in combined for p in australia_patterns):
-        return "Australia/APAC"
+        return "Australia only"
     if any(p in combined for p in latam_patterns):
-        return "LATAM"
+        return "LATAM only"
     if any(p in combined for p in europe_patterns):
         return "Europe"
-    if any(p in combined for p in worldwide_patterns):
-        return "Worldwide"
 
-    # If location just says "Remote" with no qualifier, mark as unspecified
-    loc = location.strip().lower()
+    # ── Heuristic: bare "Remote" with US company signals ─────────────────────
+    # If the location is just "Remote" / "Anywhere" but the description contains
+    # US-centric benefit language, it's almost certainly US-only.
+    us_benefit_signals = [
+        "401(k)", "401k", "pto", "health insurance", "dental insurance",
+        "vision insurance", "fsas", "hsas", "unlimited pto",
+    ]
+    if loc in ("remote", "anywhere", "") and any(s in desc for s in us_benefit_signals):
+        return "US only (inferred)"
+
     if loc in ("remote", "anywhere", ""):
         return "Unspecified"
 
-    # Has a specific country/city name — infer it's local remote
     return f"Remote ({location.strip()})"
 
 
 def _scope_matches_pref(job_scope: str, pref: str) -> bool:
-    """Return True if the job's remote scope is acceptable given candidate preference."""
+    """Return True if the job's remote scope is acceptable given candidate's preference."""
     if pref == "worldwide":
-        return True  # accept everything
-    if job_scope in ("Worldwide", "Unspecified"):
-        return True  # globally open or unknown — always include
+        return True  # accept everything when candidate is flexible
+    if job_scope == "Worldwide":
+        return True  # explicitly worldwide — always include
+    # Unspecified = unknown; let the AI scorer decide rather than hard-filter
+    if job_scope == "Unspecified":
+        return True
 
     pref_lower = pref.lower()
     scope_lower = job_scope.lower()
 
-    if pref_lower == "europe" and ("europe" in scope_lower or "eu" in scope_lower or "emea" in scope_lower):
-        return True
-    if pref_lower == "us" and "us" in scope_lower:
-        return True
-    if pref_lower == "uk" and "uk" in scope_lower:
-        return True
-    if pref_lower == "canada" and "canada" in scope_lower:
-        return True
-    if pref_lower == "australia" and ("australia" in scope_lower or "apac" in scope_lower):
-        return True
-    # custom region: check substring match
-    if pref_lower in scope_lower:
-        return True
-    return False
+    if pref_lower == "europe":
+        return any(w in scope_lower for w in ("europe", "eu ", "emea", "worldwide"))
+    if pref_lower == "us":
+        return "us" in scope_lower
+    if pref_lower == "uk":
+        return "uk" in scope_lower
+    if pref_lower == "canada":
+        return "canada" in scope_lower
+    if pref_lower == "australia":
+        return "australia" in scope_lower or "apac" in scope_lower
+    # Custom region: substring match
+    return pref_lower in scope_lower
 
 
 def _build_queries(profile: CVProfile, prefs: SearchPreferences) -> list[str]:

@@ -34,6 +34,8 @@ class SearchPreferences:
     excluded_keywords: list[str] = field(default_factory=list)
     experience_level: str = ""  # junior, mid, senior, lead, principal
     target_roles: list[str] = field(default_factory=list)
+    country: str = ""              # candidate's country, e.g. "Belgium"
+    employment_type: str = "both"  # employee | contractor | both
     extra_notes: str = ""
 
 

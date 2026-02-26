@@ -110,13 +110,27 @@ def prompt_candidate_wishes(profile: CVProfile) -> dict:
     )
     target_roles = [r.strip() for r in roles_input.split(",") if r.strip()] or profile.target_titles
 
+    # Country — prefill from CV location
+    default_country = profile.location.split(",")[-1].strip() if profile.location else ""
+    country_input = Prompt.ask(
+        "Your country (used to filter location eligibility)",
+        default=default_country or "Belgium",
+    )
+    country = country_input.strip()
+
     remote_scope = Prompt.ask(
-        "Remote scope",
+        "Remote scope preference",
         choices=["worldwide", "europe", "us", "uk", "canada", "australia", "other"],
         default="worldwide",
     )
     if remote_scope == "other":
         remote_scope = Prompt.ask("Specify region/country").strip().lower()
+
+    employment_type = Prompt.ask(
+        "Employment type",
+        choices=["employee", "contractor", "both"],
+        default="both",
+    )
 
     salary_input = Prompt.ask(
         "Minimum annual salary (USD, leave blank to skip)",
@@ -143,7 +157,9 @@ def prompt_candidate_wishes(profile: CVProfile) -> dict:
 
     return {
         "target_roles": target_roles,
+        "country": country,
         "remote_scope": remote_scope,
+        "employment_type": employment_type,
         "min_salary": min_salary,
         "excluded_keywords": excluded,
         "extra_notes": notes_input.strip(),
@@ -164,6 +180,8 @@ def build_search_preferences(profile: CVProfile, user_prefs: dict) -> SearchPref
         excluded_keywords=wishes.get("excluded_keywords", []) + user_prefs.get("excluded_keywords", []),
         experience_level=_infer_level(profile.years_experience),
         target_roles=wishes.get("target_roles", profile.target_titles),
+        country=wishes.get("country", profile.location.split(",")[-1].strip() if profile.location else ""),
+        employment_type=wishes.get("employment_type", "both"),
         extra_notes=wishes.get("extra_notes", ""),
     )
 
