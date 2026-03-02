@@ -562,11 +562,14 @@
             @click="window.open('/api/cv-builder/' + cvb.sessionId + '/preview', '_blank')"
             class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors"
           >Preview &amp; Print</button>
-          <a
-            :href="'/api/cv-builder/' + cvb.sessionId + '/pdf'"
-            download
-            class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg transition-colors font-medium"
-          >⬇ Download PDF</a>
+          <button
+            @click="downloadPrettyPdf()"
+            :disabled="cvb.generatingPdf"
+            class="text-xs bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg transition-colors font-medium flex items-center gap-1.5"
+          >
+            <span x-show="cvb.generatingPdf" class="spin text-xs">⟳</span>
+            <span x-text="cvb.generatingPdf ? 'Designing...' : '✦ Download PDF'"></span>
+          </button>
         </div>
       </div>
 
@@ -974,6 +977,7 @@ function seekerApp() {
       loading: false,
       done: false,
       mobileTab: 'chat',
+      generatingPdf: false,
     },
     prefs: {
       target_roles_text: '',
@@ -1299,6 +1303,30 @@ function seekerApp() {
       } finally {
         this.cvb.loading = false;
         this.$nextTick(() => this._scrollChat());
+      }
+    },
+
+    async downloadPrettyPdf() {
+      this.cvb.generatingPdf = true;
+      this.notify('Designing your CV with AI... (~15s)');
+      try {
+        const res = await fetch(`/api/cv-builder/${this.cvb.sessionId}/pretty-pdf`);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || 'PDF generation failed');
+        }
+        const blob = await res.blob();
+        const name = (this.cvb.cv?.name || 'cv').toLowerCase().replace(/\s+/g, '_');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${name}_cv.pdf`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        this.notify('PDF downloaded!');
+      } catch (e) {
+        this.notify('PDF error: ' + e.message);
+      } finally {
+        this.cvb.generatingPdf = false;
       }
     },
 

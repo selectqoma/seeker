@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from seeker.cv_parser import build_search_preferences, load_cv_text, parse_cv
 from seeker.web import cv_builder as cvb
+from seeker.web import pretty_cv
 from seeker.generator import generate_cover_letter, suggest_cv_adaptations
 from seeker.matcher import generate_summary, rank_jobs
 from seeker.models import CVProfile, JobListing, SearchPreferences
@@ -357,6 +358,29 @@ async def cv_builder_preview(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     from fastapi.responses import HTMLResponse
     return HTMLResponse(cvb.render_html(session["cv_draft"]))
+
+
+@app.get("/api/cv-builder/{session_id}/pretty-pdf")
+async def cv_builder_pretty_pdf(session_id: str):
+    """Design agent (Claude) generates beautiful HTML → Playwright renders to PDF."""
+    with cvb._sessions_lock:
+        session = cvb._sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    client = _get_client()
+    try:
+        pdf_bytes = await pretty_cv.generate_pretty_pdf(session["cv_draft"], client)
+    except ImportError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    name = session["cv_draft"].get("name", "cv").replace(" ", "_").lower()
+    from fastapi.responses import Response
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}_cv.pdf"'},
+    )
 
 
 @app.get("/api/cv-builder/{session_id}/pdf")
