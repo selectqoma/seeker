@@ -609,15 +609,20 @@ class HNHiringParser(BaseScraper):
     def search(self, profile: CVProfile, prefs: SearchPreferences) -> list[JobListing]:
         jobs = []
         try:
+            import time
+            # Use search_by_date so results are newest-first, and restrict to last 60 days
+            cutoff = int(time.time()) - 60 * 86400
             search_url = (
-                "https://hn.algolia.com/api/v1/search"
-                "?query=Ask+HN+Who+is+hiring&tags=ask_hn&numericFilters=points>100"
+                "https://hn.algolia.com/api/v1/search_by_date"
+                f"?query=Ask+HN+Who+is+hiring&tags=ask_hn"
+                f"&numericFilters=created_at_i>{cutoff},points>50"
             )
             resp = _get(search_url)
             if resp.status_code != 200:
                 return jobs
 
             hits = resp.json().get("hits", [])
+            # Take the most recent "who is hiring" post (hits already sorted newest first)
             hiring_post = next(
                 (h for h in hits if "who is hiring" in h.get("title", "").lower()), None
             )
@@ -649,7 +654,8 @@ class HNHiringParser(BaseScraper):
                     continue
 
                 created = comment.get("created_at", "")
-                if not _is_recent(created, prefs.max_days_old * 30):  # HN thread is monthly
+                # HN threads are monthly; allow up to 45 days so early-month comments aren't dropped
+                if not _is_recent(created, max(prefs.max_days_old, 45)):
                     continue
 
                 first_line = text.split("\n")[0][:120]

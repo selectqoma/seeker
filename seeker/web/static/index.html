@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seeker — AI Job Search</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: { slate: { 750: '#243044' } }
+        }
+      }
+    }
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background: #0f172a; color: #f1f5f9; font-family: system-ui, sans-serif; }
+    /* Markdown prose styles */
+    .md-content h2 { font-size: 1.1rem; font-weight: 700; margin: 1rem 0 0.5rem; color: #e2e8f0; }
+    .md-content h3 { font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.4rem; color: #cbd5e1; }
+    .md-content p { margin-bottom: 0.6rem; line-height: 1.6; color: #94a3b8; }
+    .md-content ul { list-style: disc; padding-left: 1.25rem; margin-bottom: 0.6rem; }
+    .md-content li { margin-bottom: 0.25rem; color: #94a3b8; line-height: 1.5; }
+    .md-content strong { color: #e2e8f0; font-weight: 600; }
+    .md-content em { color: #cbd5e1; }
+    .md-content code { background: #1e293b; padding: 0.1em 0.3em; border-radius: 0.25rem; font-size: 0.85em; }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    /* File drop zone */
+    .drop-zone { border: 2px dashed #334155; transition: border-color 0.2s, background 0.2s; }
+    .drop-zone:hover, .drop-zone.drag-over { border-color: #6366f1; background: rgba(99,102,241,0.05); }
+    /* Score ring */
+    .score-ring { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 1.1rem; }
+    /* Animate spin fix */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 1s linear infinite; display: inline-block; }
+    /* CV builder chat bubbles */
+    .bubble-ai   { background: #1e293b; border: 1px solid #334155; border-radius: 0 1rem 1rem 1rem; }
+    .bubble-user { background: #312e81; border: 1px solid #4338ca; border-radius: 1rem 1rem 0 1rem; margin-left: auto; }
+    /* CV preview (in-app) */
+    .cv-section-title { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; border-bottom: 1px solid #475569; padding-bottom: 3px; margin-bottom: 6px; color: #94a3b8; }
+    .cv-preview { font-family: Georgia, serif; font-size: 0.82rem; line-height: 1.55; color: #e2e8f0; }
+    .cv-preview h1 { font-size: 1.25rem; font-weight: 700; }
+  </style>
+</head>
+<body class="min-h-screen">
+<div x-data="seekerApp()" x-init="init()" x-cloak class="min-h-screen flex flex-col">
+
+  <!-- ── Header ───────────────────────────────────────────────────────────── -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="text-xl font-black text-indigo-400 tracking-tight">SEEKER</span>
+        <span class="text-slate-600 text-xs hidden sm:block">AI Job Search</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <button
+          x-show="profile && step !== 'upload' && step !== 'extracting' && step !== 'cv-builder'"
+          @click="startCvBuilder()"
+          class="text-emerald-400 hover:text-emerald-300 text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors font-medium"
+        >
+          ✦ Build CV
+        </button>
+        <button
+          x-show="step !== 'upload' && step !== 'extracting'"
+          @click="goSaved()"
+          class="text-slate-400 hover:text-white text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+        >
+          <span>Saved</span>
+          <span x-show="savedJobs.length > 0" class="bg-indigo-600 text-white text-xs px-1.5 py-0.5 rounded-full" x-text="savedJobs.length"></span>
+        </button>
+        <button
+          x-show="step !== 'upload' && step !== 'extracting'"
+          @click="resetProfile()"
+          class="text-slate-500 hover:text-red-400 text-xs px-2 py-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+        >
+          Change CV
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Step indicator ───────────────────────────────────────────────────── -->
+  <div x-show="['profile','preferences','searching','results'].includes(step)" class="border-b border-slate-800 bg-slate-900/50">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-1.5 text-xs">
+      <template x-for="(s, i) in stepList" :key="s.id">
+        <div class="flex items-center gap-1.5">
+          <div class="flex items-center gap-1.5 px-2 py-1 rounded-full transition-colors"
+            :class="stepState(s.id) === 'done' ? 'bg-indigo-900/50 text-indigo-300' : stepState(s.id) === 'current' ? 'bg-indigo-600 text-white' : 'text-slate-600'"
+          >
+            <span x-show="stepState(s.id) === 'done'" class="text-green-400 text-xs">✓</span>
+            <span x-show="stepState(s.id) !== 'done'" x-text="i+1" class="font-bold w-3 text-center"></span>
+            <span x-text="s.label"></span>
+          </div>
+          <span x-show="i < stepList.length - 1" class="text-slate-700">›</span>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Main ─────────────────────────────────────────────────────────────── -->
+  <main class="flex-1 max-w-6xl mx-auto w-full px-4 py-8">
+
+    <!-- ┌─ UPLOAD ─────────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'upload'" class="max-w-md mx-auto">
+      <div class="text-center mb-10">
+        <div class="text-5xl mb-4">🔍</div>
+        <h1 class="text-3xl font-bold mb-2">Find your next role</h1>
+        <p class="text-slate-400">Upload your CV and AI will match you with the best remote jobs across 9 job boards.</p>
+      </div>
+
+      <div
+        class="drop-zone rounded-2xl p-12 text-center cursor-pointer"
+        :class="isDragging ? 'drag-over' : ''"
+        @click="$refs.fileInput.click()"
+        @dragover.prevent="isDragging = true"
+        @dragleave.prevent="isDragging = false"
+        @drop.prevent="isDragging = false; handleFileDrop($event)"
+      >
+        <div class="text-4xl mb-4">📄</div>
+        <p class="text-lg font-semibold mb-1">Drop your CV here</p>
+        <p class="text-slate-500 text-sm mb-4">PDF or plain text (.txt)</p>
+        <span class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-lg cursor-pointer transition-colors">
+          Browse file
+        </span>
+        <input type="file" x-ref="fileInput" class="hidden" accept=".pdf,.txt" @change="handleFileSelect($event)">
+      </div>
+
+      <div x-show="uploadError" class="mt-4 bg-red-900/30 border border-red-700/50 rounded-xl p-4 text-red-300 text-sm" x-text="uploadError"></div>
+    </div>
+
+    <!-- ┌─ EXTRACTING ────────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'extracting'" class="max-w-sm mx-auto text-center py-24">
+      <div class="spin text-5xl mb-6">⟳</div>
+      <h2 class="text-xl font-semibold mb-2">Reading your CV...</h2>
+      <p class="text-slate-400 text-sm">Claude AI is extracting your profile</p>
+    </div>
+
+    <!-- ┌─ PROFILE ──────────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'profile'" class="max-w-2xl mx-auto">
+      <h2 class="text-2xl font-bold mb-1">Profile extracted</h2>
+      <p class="text-slate-400 mb-6 text-sm">Review what we found in your CV before searching.</p>
+
+      <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6">
+        <div class="flex items-start gap-4 mb-5">
+          <div class="w-12 h-12 rounded-full bg-indigo-600/20 border border-indigo-600/30 flex items-center justify-center text-xl font-bold text-indigo-400 shrink-0" x-text="(profile?.name || '?').charAt(0).toUpperCase()"></div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-3 flex-wrap">
+              <h3 class="text-xl font-bold" x-text="profile?.name || 'Unknown'"></h3>
+              <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-900 text-indigo-300" x-text="inferLevel(profile?.years_experience)"></span>
+            </div>
+            <p class="text-slate-400 text-sm mt-0.5">
+              <span x-text="profile?.current_title"></span>
+              <span x-show="profile?.years_experience"> · <span x-text="profile?.years_experience"></span> yrs exp</span>
+              <span x-show="profile?.location"> · <span x-text="profile?.location"></span></span>
+            </p>
+            <p x-show="profile?.email" class="text-slate-500 text-xs mt-0.5" x-text="profile?.email"></p>
+          </div>
+        </div>
+
+        <p x-show="profile?.summary" class="text-slate-300 text-sm mb-5 leading-relaxed" x-text="profile?.summary"></p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+          <div x-show="profile?.target_titles?.length">
+            <h4 class="text-slate-500 text-xs uppercase tracking-wide mb-2">Target Roles</h4>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="role in profile?.target_titles || []">
+                <span class="bg-indigo-900/40 text-indigo-300 border border-indigo-800/50 px-2 py-0.5 rounded-lg text-xs" x-text="role"></span>
+              </template>
+            </div>
+          </div>
+          <div x-show="profile?.skills?.length">
+            <h4 class="text-slate-500 text-xs uppercase tracking-wide mb-2">Top Skills</h4>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="skill in (profile?.skills || []).slice(0, 10)">
+                <span class="bg-slate-700/60 text-slate-300 px-2 py-0.5 rounded-lg text-xs" x-text="skill"></span>
+              </template>
+            </div>
+          </div>
+          <div x-show="profile?.industries?.length">
+            <h4 class="text-slate-500 text-xs uppercase tracking-wide mb-2">Industries</h4>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="ind in profile?.industries || []">
+                <span class="bg-slate-700/60 text-slate-300 px-2 py-0.5 rounded-lg text-xs" x-text="ind"></span>
+              </template>
+            </div>
+          </div>
+          <div x-show="profile?.education?.length">
+            <h4 class="text-slate-500 text-xs uppercase tracking-wide mb-2">Education</h4>
+            <template x-for="edu in profile?.education || []">
+              <p class="text-slate-400 text-xs" x-text="edu"></p>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex gap-3 mb-3">
+        <button @click="step = 'preferences'" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors">
+          Search Jobs →
+        </button>
+        <button @click="step = 'upload'" class="px-5 py-3 text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 rounded-xl transition-colors text-sm">
+          Re-upload
+        </button>
+      </div>
+      <button
+        @click="startCvBuilder()"
+        class="w-full border border-emerald-700/50 bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-300 font-medium py-3 px-6 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
+      >
+        <span>✦</span>
+        <span>Build a better CV first — AI consultant will iterate with you</span>
+      </button>
+    </div>
+
+    <!-- ┌─ PREFERENCES ──────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'preferences'" class="max-w-2xl mx-auto">
+      <div class="flex items-center justify-between mb-1">
+        <h2 class="text-2xl font-bold">Search Preferences</h2>
+        <button @click="step = 'profile'" class="text-slate-500 hover:text-slate-300 text-sm">← Profile</button>
+      </div>
+      <p class="text-slate-400 text-sm mb-6">Tell us what you're looking for — be specific for better results.</p>
+
+      <div class="space-y-5">
+
+        <!-- Target roles -->
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1.5">Target Roles</label>
+          <input
+            type="text"
+            x-model="prefs.target_roles_text"
+            placeholder="e.g. Backend Engineer, Staff Engineer, Tech Lead"
+            class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none"
+          >
+          <p class="text-xs text-slate-600 mt-1">Comma-separated. Blank = use CV targets.</p>
+        </div>
+
+        <!-- ── Region section ─────────────────────────────────────────────── -->
+        <div class="bg-slate-800/40 border border-amber-700/30 rounded-2xl p-5">
+          <div class="flex items-center gap-2 mb-4">
+            <span class="text-lg">🌍</span>
+            <h3 class="font-semibold text-slate-200">Region &amp; Eligibility</h3>
+            <span class="text-xs bg-amber-900/60 text-amber-300 border border-amber-700/40 px-2 py-0.5 rounded-full">Important</span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
+            <!-- Your country -->
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-1.5">Your Country of Residence</label>
+              <input
+                type="text"
+                x-model="prefs.country"
+                placeholder="e.g. Belgium, Germany, UK"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none"
+              >
+              <p class="text-xs text-slate-600 mt-1">Used to filter work-authorization requirements</p>
+            </div>
+
+            <!-- Remote scope -->
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-1.5">Where Can You Work Remotely?</label>
+              <select
+                x-model="prefs.remote_scope"
+                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none cursor-pointer"
+              >
+                <option value="worldwide">🌐 Worldwide — no restrictions</option>
+                <option value="europe">🇪🇺 Europe / EMEA only</option>
+                <option value="us">🇺🇸 US only (need US work auth)</option>
+                <option value="uk">🇬🇧 UK only (need UK right to work)</option>
+                <option value="canada">🇨🇦 Canada only</option>
+                <option value="australia">🇦🇺 Australia only</option>
+              </select>
+              <p class="text-xs text-slate-600 mt-1">Filters jobs by geographic eligibility</p>
+            </div>
+          </div>
+
+          <!-- Scope explanation -->
+          <div class="bg-slate-900/60 rounded-xl p-3 text-xs text-slate-400">
+            <template x-if="prefs.remote_scope === 'worldwide'">
+              <p>✅ <strong class="text-slate-300">All remote jobs</strong> are included regardless of location restrictions. Best if you hold citizenship/residency that allows remote work for any company.</p>
+            </template>
+            <template x-if="prefs.remote_scope === 'europe'">
+              <p>🇪🇺 Only jobs <strong class="text-slate-300">open to European / EMEA candidates</strong>. Jobs restricted to US, UK, Canada or Australia will be excluded.</p>
+            </template>
+            <template x-if="prefs.remote_scope === 'us'">
+              <p>🇺🇸 Only jobs requiring <strong class="text-slate-300">US work authorization</strong> (citizen, green card, or eligible for H-1B sponsorship). Includes US-only remote roles.</p>
+            </template>
+            <template x-if="prefs.remote_scope === 'uk'">
+              <p>🇬🇧 Only jobs where <strong class="text-slate-300">UK right to work</strong> is required or accepted. EU settled-status roles also included.</p>
+            </template>
+            <template x-if="prefs.remote_scope === 'canada'">
+              <p>🇨🇦 Only jobs open to <strong class="text-slate-300">Canadian residents / work permit holders</strong>.</p>
+            </template>
+            <template x-if="prefs.remote_scope === 'australia'">
+              <p>🇦🇺 Only jobs open to <strong class="text-slate-300">Australian residents / work permit holders</strong>.</p>
+            </template>
+          </div>
+        </div>
+
+        <!-- Employment type -->
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-2">Employment Type</label>
+          <div class="flex gap-3 flex-wrap">
+            <template x-for="opt in [{v:'employee',l:'Employee (W2 / PAYE)'},{v:'contractor',l:'Contractor / Freelance'},{v:'both',l:'Both'}]">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" x-model="prefs.employment_type" :value="opt.v" class="accent-indigo-500">
+                <span class="text-sm" x-text="opt.l"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <!-- Min salary -->
+          <div>
+            <label class="block text-sm font-medium text-slate-300 mb-1.5">Min Salary (USD, optional)</label>
+            <input
+              type="text"
+              x-model="prefs.min_salary"
+              placeholder="e.g. 80k or 120000"
+              class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none"
+            >
+          </div>
+          <!-- Max job age -->
+          <div>
+            <label class="block text-sm font-medium text-slate-300 mb-1.5">Posted within (days)</label>
+            <input
+              type="number"
+              x-model="prefs.max_days_old"
+              min="1" max="90"
+              class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none"
+            >
+          </div>
+        </div>
+
+        <!-- Keywords to avoid -->
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1.5">Keywords / Roles to Avoid</label>
+          <input
+            type="text"
+            x-model="prefs.excluded_keywords_text"
+            placeholder="e.g. PHP, recruitment, sales, .NET"
+            class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none"
+          >
+        </div>
+
+        <!-- Extra notes -->
+        <div>
+          <label class="block text-sm font-medium text-slate-300 mb-1.5">Additional Preferences</label>
+          <textarea
+            x-model="prefs.extra_notes"
+            rows="2"
+            placeholder="e.g. prefer startups, no consulting firms, equity important, avoid enterprise software..."
+            class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm outline-none resize-none"
+          ></textarea>
+        </div>
+
+        <!-- Advanced -->
+        <details class="text-sm">
+          <summary class="text-slate-500 cursor-pointer hover:text-slate-300 select-none">Advanced options</summary>
+          <div class="mt-3 grid grid-cols-2 gap-3 pl-2 border-l border-slate-700">
+            <div>
+              <label class="block text-slate-400 text-xs mb-1">Top N results</label>
+              <input type="number" x-model="prefs.top_n" min="5" max="50" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm outline-none focus:ring-1 focus:ring-indigo-500">
+            </div>
+            <div>
+              <label class="block text-slate-400 text-xs mb-1">Min match score (0–100)</label>
+              <input type="number" x-model="prefs.min_score" min="0" max="100" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm outline-none focus:ring-1 focus:ring-indigo-500">
+            </div>
+          </div>
+        </details>
+
+        <button
+          @click="startSearch()"
+          class="w-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold py-4 px-6 rounded-xl transition-colors text-base"
+        >
+          🔍 Start Search
+        </button>
+      </div>
+    </div>
+
+    <!-- ┌─ SEARCHING ────────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'searching'" class="max-w-lg mx-auto py-6">
+      <div class="text-center mb-8">
+        <div class="spin text-5xl mb-5">🔍</div>
+        <h2 class="text-2xl font-bold mb-1">Searching...</h2>
+        <p class="text-slate-400 text-sm" x-text="searchStatusText()"></p>
+      </div>
+
+      <div class="space-y-3">
+        <!-- Stage 1 -->
+        <div class="bg-slate-800 border rounded-xl p-4 transition-opacity" :class="{'opacity-40': ['complete','error'].includes(searchState.status) && searchState.status !== 'scraping'}" >
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <span class="font-medium text-sm">Scraping job boards</span>
+              <p class="text-slate-500 text-xs">RemoteOK · LinkedIn · Indeed · HN · 5 more</p>
+            </div>
+            <span x-show="searchState.status !== 'scraping' && searchState.status !== ''" class="text-green-400 text-lg">✓</span>
+            <span x-show="searchState.status === 'scraping'" class="spin text-indigo-400">⟳</span>
+          </div>
+          <div class="h-1 bg-slate-700 rounded overflow-hidden">
+            <div class="h-1 rounded transition-all duration-700"
+              :class="searchState.status === 'scraping' ? 'bg-indigo-500 animate-pulse w-2/3' : 'bg-green-500 w-full'"
+              :style="searchState.status === 'scraping' ? '' : 'width:100%'"
+            ></div>
+          </div>
+          <p class="text-slate-500 text-xs mt-1.5" x-show="searchState.scraped > 0">
+            Found <strong class="text-slate-300" x-text="searchState.scraped"></strong> listings
+          </p>
+        </div>
+
+        <!-- Stage 2 -->
+        <div class="bg-slate-800 border rounded-xl p-4 transition-opacity" :class="{'opacity-40': searchState.status === 'scraping'}">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <span class="font-medium text-sm">AI scoring &amp; ranking</span>
+              <p class="text-slate-500 text-xs">Claude Haiku · parallel · match analysis</p>
+            </div>
+            <span x-show="['summarizing','complete'].includes(searchState.status)" class="text-green-400 text-lg">✓</span>
+            <span x-show="searchState.status === 'scoring'" class="spin text-indigo-400">⟳</span>
+          </div>
+          <div class="h-1 bg-slate-700 rounded overflow-hidden">
+            <div class="h-1 rounded transition-all duration-700"
+              :class="searchState.status === 'scoring' ? 'bg-indigo-500 animate-pulse w-1/2' : (['summarizing','complete'].includes(searchState.status) ? 'bg-green-500 w-full' : 'w-0')"
+            ></div>
+          </div>
+          <p class="text-slate-500 text-xs mt-1.5" x-show="searchState.total > 0">
+            Scoring <strong class="text-slate-300" x-text="searchState.total"></strong> candidates
+          </p>
+        </div>
+
+        <!-- Stage 3 -->
+        <div class="bg-slate-800 border rounded-xl p-4 transition-opacity" :class="{'opacity-40': ['scraping','scoring'].includes(searchState.status)}">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <span class="font-medium text-sm">Generating strategic summary</span>
+              <p class="text-slate-500 text-xs">Claude Sonnet · career advisor</p>
+            </div>
+            <span x-show="searchState.status === 'complete'" class="text-green-400 text-lg">✓</span>
+            <span x-show="searchState.status === 'summarizing'" class="spin text-indigo-400">⟳</span>
+          </div>
+          <div class="h-1 bg-slate-700 rounded overflow-hidden">
+            <div class="h-1 rounded transition-all duration-700"
+              :class="searchState.status === 'complete' ? 'bg-green-500 w-full' : (searchState.status === 'summarizing' ? 'bg-indigo-500 animate-pulse w-2/3' : 'w-0')"
+            ></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div x-show="searchState.error" class="mt-4 bg-red-900/30 border border-red-700/50 rounded-xl p-4">
+        <p class="text-red-300 font-medium text-sm">Search failed</p>
+        <p class="text-red-400 text-xs mt-1" x-text="searchState.error"></p>
+        <button @click="step = 'preferences'" class="mt-3 text-sm text-red-400 hover:text-white">← Try again</button>
+      </div>
+    </div>
+
+    <!-- ┌─ RESULTS ──────────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'results'">
+      <!-- AI Summary -->
+      <div x-show="summary" class="bg-gradient-to-br from-indigo-950/60 to-purple-950/40 border border-indigo-800/40 rounded-2xl p-5 mb-6">
+        <div class="flex items-center gap-2 mb-3">
+          <span>✨</span>
+          <h3 class="font-semibold text-indigo-300 text-sm">AI Career Advisor</h3>
+        </div>
+        <div class="md-content text-sm" x-html="renderMarkdown(summary)"></div>
+      </div>
+
+      <!-- Controls bar -->
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-slate-400 text-sm" x-text="filteredJobs().length + ' of ' + jobs.length + ' jobs'"></span>
+          <select x-model="filters.remote_scope" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none cursor-pointer">
+            <option value="">All regions</option>
+            <option value="Worldwide">Worldwide</option>
+            <option value="Europe">Europe</option>
+            <option value="US only">US only</option>
+            <option value="UK only">UK only</option>
+            <option value="Unspecified">Unspecified</option>
+          </select>
+          <select x-model="filters.min_score" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none cursor-pointer">
+            <option value="0">All scores</option>
+            <option value="60">Score 60+</option>
+            <option value="70">Score 70+</option>
+            <option value="80">Score 80+</option>
+          </select>
+        </div>
+        <button @click="step = 'preferences'" class="text-slate-500 hover:text-white text-xs flex items-center gap-1 transition-colors">← New search</button>
+      </div>
+
+      <!-- Job cards -->
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <template x-for="(job, idx) in filteredJobs()" :key="job.url">
+          <div
+            class="group bg-slate-800 hover:bg-slate-800/80 border border-slate-700 hover:border-indigo-500/60 rounded-2xl p-5 cursor-pointer transition-all"
+            @click="openJob(job, idx + 1)"
+          >
+            <!-- Score + title row -->
+            <div class="flex items-start gap-3 mb-3">
+              <div class="score-ring shrink-0"
+                :class="scoreBg(job.match_score)"
+                :style="'color:' + scoreHex(job.match_score)"
+                x-text="Math.round(job.match_score)"
+              ></div>
+              <div class="flex-1 min-w-0">
+                <h3 class="font-semibold text-white text-sm leading-tight line-clamp-2 group-hover:text-indigo-200 transition-colors" x-text="job.title"></h3>
+                <p class="text-indigo-400 text-xs mt-0.5 truncate" x-text="job.company"></p>
+              </div>
+            </div>
+
+            <!-- Score bar -->
+            <div class="h-0.5 bg-slate-700 rounded mb-3">
+              <div class="h-0.5 rounded transition-all" :class="scoreBarColor(job.match_score)" :style="'width:' + job.match_score + '%'"></div>
+            </div>
+
+            <!-- Location + scope + salary -->
+            <div class="flex items-center gap-1.5 mb-2 flex-wrap">
+              <span class="text-slate-500 text-xs truncate" x-text="job.location"></span>
+              <span class="px-1.5 py-0.5 rounded-full text-xs whitespace-nowrap" :class="scopeBadge(job.remote_scope)" x-text="job.remote_scope || 'Remote'"></span>
+            </div>
+            <div x-show="job.salary" class="text-green-400 text-xs font-semibold mb-2" x-text="job.salary"></div>
+
+            <!-- Reason / concern -->
+            <p x-show="job.match_reasons?.[0]" class="text-green-400/80 text-xs mb-1 line-clamp-1" x-text="'✓ ' + job.match_reasons?.[0]"></p>
+            <p x-show="job.match_concerns?.[0] && job.match_concerns[0] !== 'none'" class="text-amber-400/80 text-xs line-clamp-1" x-text="'⚠ ' + job.match_concerns?.[0]"></p>
+
+            <!-- Footer -->
+            <div class="flex items-center justify-between mt-3 pt-3 border-t border-slate-700/60">
+              <span class="text-slate-600 text-xs" x-text="job.source"></span>
+              <span class="text-slate-600 text-xs" x-text="job.posted_date || ''"></span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="filteredJobs().length === 0" class="text-center py-16 text-slate-500">
+        <p class="text-3xl mb-3">🔍</p>
+        <p>No jobs match the current filters.</p>
+        <button @click="filters = {remote_scope: '', min_score: 0}" class="mt-2 text-indigo-400 hover:text-indigo-300 text-sm">Clear filters</button>
+      </div>
+    </div>
+
+    <!-- ┌─ CV BUILDER ───────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'cv-builder'" class="flex flex-col h-[calc(100vh-8rem)]">
+
+      <!-- Toolbar -->
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div class="flex items-center gap-3">
+          <button @click="step = profile ? 'profile' : 'upload'" class="text-slate-500 hover:text-white text-sm transition-colors">← Back</button>
+          <span class="text-lg font-bold text-emerald-400">✦ CV Builder</span>
+          <span x-show="cvb.done" class="text-xs bg-green-900/50 text-green-400 border border-green-700/40 px-2 py-0.5 rounded-full">Complete</span>
+          <span x-show="cvb.sessionId && !cvb.done" class="text-xs text-slate-600">session: <span x-text="cvb.sessionId"></span></span>
+        </div>
+        <div class="flex gap-2" x-show="cvb.sessionId">
+          <button
+            @click="window.open('/api/cv-builder/' + cvb.sessionId + '/preview', '_blank')"
+            class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors"
+          >Preview &amp; Print</button>
+          <a
+            :href="'/api/cv-builder/' + cvb.sessionId + '/pdf'"
+            download
+            class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg transition-colors font-medium"
+          >⬇ Download PDF</a>
+        </div>
+      </div>
+
+      <!-- Loading init -->
+      <div x-show="cvb.loading && !cvb.sessionId" class="flex-1 flex items-center justify-center">
+        <div class="text-center">
+          <div class="spin text-4xl mb-4">✦</div>
+          <p class="text-slate-400 text-sm">Reviewing your CV...</p>
+        </div>
+      </div>
+
+      <!-- Main split layout -->
+      <div x-show="cvb.sessionId" class="flex-1 grid grid-cols-1 lg:grid-cols-5 gap-4 min-h-0">
+
+        <!-- ── Chat panel (left / top on mobile) ─────────────────────────── -->
+        <div class="lg:col-span-2 flex flex-col bg-slate-800/50 border border-slate-700 rounded-2xl overflow-hidden">
+
+          <!-- Mobile tab toggle -->
+          <div class="flex border-b border-slate-700 lg:hidden">
+            <button class="flex-1 py-2 text-xs font-medium transition-colors"
+              :class="cvb.mobileTab==='chat' ? 'text-white bg-slate-800' : 'text-slate-500'"
+              @click="cvb.mobileTab='chat'">Chat</button>
+            <button class="flex-1 py-2 text-xs font-medium transition-colors"
+              :class="cvb.mobileTab==='preview' ? 'text-white bg-slate-800' : 'text-slate-500'"
+              @click="cvb.mobileTab='preview'">CV Preview</button>
+          </div>
+
+          <div class="hidden lg:flex items-center gap-2 px-4 py-2.5 border-b border-slate-700">
+            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Conversation</span>
+          </div>
+
+          <!-- Messages -->
+          <div
+            x-show="cvb.mobileTab==='chat' || true"
+            class="flex-1 overflow-y-auto p-4 space-y-3"
+            x-ref="chatScroll"
+          >
+            <template x-for="(msg, i) in cvb.messages" :key="i">
+              <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                <div
+                  class="max-w-[90%] px-4 py-3 text-sm leading-relaxed"
+                  :class="msg.role === 'user' ? 'bubble-user text-indigo-100' : 'bubble-ai text-slate-200'"
+                >
+                  <div x-show="msg.role === 'assistant'" class="md-content" x-html="renderMarkdown(msg.content)"></div>
+                  <div x-show="msg.role === 'user'" x-text="msg.content"></div>
+                </div>
+              </div>
+            </template>
+            <!-- Loading bubble -->
+            <div x-show="cvb.loading" class="flex justify-start">
+              <div class="bubble-ai px-4 py-3 text-slate-400 text-sm">
+                <span class="spin inline-block mr-1">⟳</span> Thinking...
+              </div>
+            </div>
+          </div>
+
+          <!-- Input -->
+          <div class="border-t border-slate-700 p-3 flex gap-2">
+            <textarea
+              x-model="cvb.input"
+              @keydown.enter.prevent="if (!$event.shiftKey && cvb.input.trim()) sendCvMessage()"
+              :disabled="cvb.loading || cvb.done"
+              rows="2"
+              placeholder="Type your response... (Enter to send, Shift+Enter for newline)"
+              class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 resize-none outline-none focus:ring-1 focus:ring-emerald-500 disabled:opacity-50"
+            ></textarea>
+            <button
+              @click="sendCvMessage()"
+              :disabled="cvb.loading || !cvb.input.trim() || cvb.done"
+              class="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white px-4 rounded-xl transition-colors text-sm font-medium self-end pb-2 pt-2"
+            >→</button>
+          </div>
+        </div>
+
+        <!-- ── CV Preview panel (right / bottom on mobile) ──────────────── -->
+        <div
+          class="lg:col-span-3 bg-slate-900/50 border border-slate-700 rounded-2xl overflow-hidden flex flex-col"
+          :class="cvb.mobileTab==='preview' ? '' : 'hidden lg:flex'"
+        >
+          <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 shrink-0">
+            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Live CV Preview</span>
+            <span class="text-xs text-slate-600">Updates as Claude refines it</span>
+          </div>
+          <div class="flex-1 overflow-y-auto p-5">
+            <div class="cv-preview" x-show="cvb.cv">
+              <!-- Header -->
+              <h1 x-text="cvb.cv?.name || '—'"></h1>
+              <p class="text-slate-400 text-xs mt-1 mb-1" x-text="[cvb.cv?.email, cvb.cv?.phone, cvb.cv?.location, cvb.cv?.linkedin, cvb.cv?.github].filter(Boolean).join(' · ')"></p>
+              <p x-show="cvb.cv?.headline" class="text-slate-300 italic text-sm mb-4" x-text="cvb.cv?.headline"></p>
+
+              <!-- Summary -->
+              <template x-if="cvb.cv?.summary">
+                <div class="mb-4">
+                  <div class="cv-section-title">Professional Summary</div>
+                  <p class="text-slate-300 text-sm leading-relaxed" x-text="cvb.cv.summary"></p>
+                </div>
+              </template>
+
+              <!-- Experience -->
+              <template x-if="cvb.cv?.experience?.length">
+                <div class="mb-4">
+                  <div class="cv-section-title">Experience</div>
+                  <template x-for="(job, i) in cvb.cv.experience" :key="i">
+                    <div class="mb-3">
+                      <div class="flex items-baseline justify-between">
+                        <span class="font-bold text-white text-sm" x-text="job.company"></span>
+                        <span class="text-xs text-slate-500" x-text="job.period"></span>
+                      </div>
+                      <div class="italic text-slate-400 text-xs mb-1" x-text="job.title"></div>
+                      <ul class="list-disc list-inside space-y-0.5">
+                        <template x-for="(b, j) in job.bullets" :key="j">
+                          <li class="text-slate-300 text-xs leading-relaxed" x-text="b"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Skills -->
+              <template x-if="cvb.cv?.skills && Object.keys(cvb.cv.skills).length">
+                <div class="mb-4">
+                  <div class="cv-section-title">Skills</div>
+                  <template x-for="[cat, items] in Object.entries(cvb.cv.skills)" :key="cat">
+                    <p class="text-xs mb-1">
+                      <strong class="text-slate-300" x-text="cat + ':'"></strong>
+                      <span class="text-slate-400" x-text="' ' + (Array.isArray(items) ? items.join(', ') : items)"></span>
+                    </p>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Education -->
+              <template x-if="cvb.cv?.education?.length">
+                <div class="mb-4">
+                  <div class="cv-section-title">Education</div>
+                  <template x-for="(edu, i) in cvb.cv.education" :key="i">
+                    <div class="mb-2 text-xs">
+                      <span class="font-semibold text-white" x-text="typeof edu === 'string' ? edu : edu.institution"></span>
+                      <span x-show="typeof edu !== 'string' && edu.degree" class="text-slate-400" x-text="' — ' + (edu.degree||'')"></span>
+                      <span x-show="typeof edu !== 'string' && edu.year" class="text-slate-500" x-text="' · ' + (edu.year||'')"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Languages + Certs -->
+              <template x-if="cvb.cv?.languages?.length || cvb.cv?.certifications?.length">
+                <div>
+                  <div class="cv-section-title">Additional</div>
+                  <p x-show="cvb.cv?.languages?.length" class="text-xs mb-1">
+                    <strong class="text-slate-300">Languages:</strong>
+                    <span class="text-slate-400" x-text="' ' + cvb.cv.languages.join(', ')"></span>
+                  </p>
+                  <p x-show="cvb.cv?.certifications?.length" class="text-xs">
+                    <strong class="text-slate-300">Certifications:</strong>
+                    <span class="text-slate-400" x-text="' ' + cvb.cv.certifications.join(', ')"></span>
+                  </p>
+                </div>
+              </template>
+
+              <!-- Empty state -->
+              <div x-show="!cvb.cv?.name && !cvb.cv?.summary" class="text-slate-600 text-sm text-center py-8">
+                Your CV will appear here as Claude refines it...
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /grid -->
+    </div>
+
+    <!-- ┌─ SAVED JOBS ───────────────────────────────────────────────────────┐ -->
+    <div x-show="step === 'saved'">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-2xl font-bold">Saved Jobs <span class="text-slate-500 font-normal text-lg">(<span x-text="savedJobs.length"></span>)</span></h2>
+        <button @click="step = jobs.length ? 'results' : 'preferences'" class="text-slate-400 hover:text-white text-sm">← Back</button>
+      </div>
+
+      <div x-show="savedJobs.length === 0" class="text-center py-20 text-slate-500">
+        <p class="text-4xl mb-3">📭</p>
+        <p>No saved jobs yet.</p>
+        <p class="text-sm mt-1">Open any job and click "Save for later".</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <template x-for="job in savedJobs" :key="job.url">
+          <div class="bg-slate-800 border border-slate-700 hover:border-indigo-500/60 rounded-2xl p-5 cursor-pointer transition-all" @click="openJob(job, null)">
+            <div class="flex items-start gap-3 mb-3">
+              <div class="score-ring shrink-0" :class="scoreBg(job.match_score)" :style="'color:' + scoreHex(job.match_score)" x-text="Math.round(job.match_score || 0)"></div>
+              <div class="flex-1 min-w-0">
+                <h3 class="font-semibold text-sm line-clamp-2" x-text="job.title"></h3>
+                <p class="text-indigo-400 text-xs mt-0.5" x-text="job.company"></p>
+              </div>
+            </div>
+            <div class="flex gap-2 flex-wrap mb-2">
+              <span class="text-slate-500 text-xs" x-text="job.location"></span>
+              <span class="px-1.5 py-0.5 rounded-full text-xs" :class="scopeBadge(job.remote_scope)" x-text="job.remote_scope || ''"></span>
+            </div>
+            <p class="text-slate-600 text-xs">Saved <span x-text="job.saved_at ? new Date(job.saved_at).toLocaleDateString() : 'recently'"></span></p>
+          </div>
+        </template>
+      </div>
+    </div>
+
+  </main><!-- /main -->
+
+  <!-- ── Job Detail Modal ──────────────────────────────────────────────────── -->
+  <div
+    x-show="selectedJob !== null"
+    x-cloak
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="opacity-0"
+    x-transition:enter-end="opacity-100"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    class="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-start justify-center p-3 sm:p-6 z-50 overflow-y-auto"
+    @click.self="closeJob()"
+    @keydown.escape.window="closeJob()"
+  >
+    <div class="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl shadow-2xl my-4" @click.stop>
+
+      <!-- Modal header -->
+      <div class="flex items-start gap-4 p-5 sm:p-6 border-b border-slate-800">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap mb-1">
+            <h2 class="text-lg font-bold leading-tight" x-text="selectedJob?.title"></h2>
+            <span class="px-2 py-0.5 rounded-full text-xs" :class="scopeBadge(selectedJob?.remote_scope)" x-text="selectedJob?.remote_scope || 'Remote'"></span>
+          </div>
+          <p class="text-indigo-400 font-semibold text-sm" x-text="selectedJob?.company"></p>
+          <div class="flex flex-wrap gap-2 mt-1 text-xs text-slate-500">
+            <span x-text="selectedJob?.location"></span>
+            <span x-show="selectedJob?.salary" class="text-green-400 font-semibold" x-text="selectedJob?.salary"></span>
+            <span x-show="selectedJob?.job_type" x-text="selectedJob?.job_type"></span>
+            <span x-show="selectedJob?.source">via <span x-text="selectedJob?.source"></span></span>
+            <span x-show="selectedJob?.posted_date" x-text="selectedJob?.posted_date"></span>
+          </div>
+        </div>
+        <div class="text-right shrink-0">
+          <div class="score-ring" :class="scoreBg(selectedJob?.match_score)" :style="'color:' + scoreHex(selectedJob?.match_score); 'width:60px; height:60px; font-size:1.25rem'" x-text="Math.round(selectedJob?.match_score || 0)"></div>
+          <div class="text-xs text-slate-600 mt-1">match</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="flex border-b border-slate-800 overflow-x-auto">
+        <template x-for="tab in [{id:'overview',l:'Overview'},{id:'cover-letter',l:'Cover Letter'},{id:'adapt-cv',l:'Adapt CV'}]" :key="tab.id">
+          <button
+            class="px-5 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px"
+            :class="activeTab === tab.id ? 'text-white border-indigo-500' : 'text-slate-500 border-transparent hover:text-slate-300'"
+            @click="activeTab = tab.id"
+            x-text="tab.l"
+          ></button>
+        </template>
+      </div>
+
+      <!-- Tab content -->
+      <div class="p-5 sm:p-6 max-h-[55vh] overflow-y-auto">
+
+        <!-- Overview -->
+        <div x-show="activeTab === 'overview'">
+          <!-- Fit analysis -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5" x-show="selectedJob?.match_reasons?.length || selectedJob?.match_concerns?.length">
+            <div x-show="selectedJob?.match_reasons?.length">
+              <h4 class="text-green-400 text-xs font-semibold uppercase tracking-wide mb-2">Why it fits</h4>
+              <ul class="space-y-1.5">
+                <template x-for="r in selectedJob?.match_reasons || []">
+                  <li class="flex items-start gap-2 text-xs text-slate-300">
+                    <span class="text-green-400 mt-0.5 shrink-0">✓</span><span x-text="r"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+            <div x-show="selectedJob?.match_concerns?.filter(c => c && c !== 'none').length">
+              <h4 class="text-amber-400 text-xs font-semibold uppercase tracking-wide mb-2">Watch out for</h4>
+              <ul class="space-y-1.5">
+                <template x-for="c in (selectedJob?.match_concerns || []).filter(c => c && c !== 'none')">
+                  <li class="flex items-start gap-2 text-xs text-slate-300">
+                    <span class="text-amber-400 mt-0.5 shrink-0">⚠</span><span x-text="c"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Tags -->
+          <div x-show="selectedJob?.tags?.length" class="flex flex-wrap gap-1.5 mb-4">
+            <template x-for="tag in (selectedJob?.tags || []).slice(0, 15)" :key="tag">
+              <span class="bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded text-xs" x-text="tag"></span>
+            </template>
+          </div>
+
+          <!-- Description -->
+          <div class="mb-5">
+            <h4 class="text-slate-400 text-xs font-semibold uppercase tracking-wide mb-2">Job Description</h4>
+            <div class="text-sm text-slate-400 whitespace-pre-line leading-relaxed max-h-56 overflow-y-auto rounded-xl bg-slate-800/50 p-4" x-text="selectedJob?.description"></div>
+          </div>
+
+          <!-- Apply -->
+          <a
+            :href="selectedJob?.apply_url || selectedJob?.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="block w-full bg-indigo-600 hover:bg-indigo-700 text-white text-center font-semibold py-3 rounded-xl transition-colors"
+          >
+            Apply Now →
+          </a>
+        </div>
+
+        <!-- Cover Letter -->
+        <div x-show="activeTab === 'cover-letter'">
+          <div x-show="!coverLetter && !loadingCoverLetter" class="text-center py-10">
+            <p class="text-slate-400 text-sm mb-5">Generate a tailored, natural-sounding cover letter specific to this role and company.</p>
+            <button @click="generateCoverLetter()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors">
+              ✨ Generate Cover Letter
+            </button>
+          </div>
+          <div x-show="loadingCoverLetter" class="text-center py-12">
+            <div class="spin text-4xl mb-4">⟳</div>
+            <p class="text-slate-400 text-sm">Writing your cover letter with Claude Sonnet...</p>
+          </div>
+          <div x-show="coverLetter && !loadingCoverLetter">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold text-sm">Cover Letter</h3>
+              <div class="flex gap-2">
+                <button @click="copyText(coverLetter)" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Copy</button>
+                <button @click="downloadText(coverLetter, 'cover-letter.txt')" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Download</button>
+                <button @click="coverLetter = ''" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Regenerate</button>
+              </div>
+            </div>
+            <div class="md-content bg-slate-800 rounded-xl p-5 text-sm leading-relaxed" x-html="renderMarkdown(coverLetter)"></div>
+          </div>
+        </div>
+
+        <!-- Adapt CV -->
+        <div x-show="activeTab === 'adapt-cv'">
+          <div x-show="!cvAdaptation && !loadingCvAdaptation" class="text-center py-10">
+            <p class="text-slate-400 text-sm mb-5">Get specific, actionable suggestions to tailor your CV for this exact role.</p>
+            <button @click="generateCvAdaptation()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-8 rounded-xl transition-colors">
+              📝 Generate CV Suggestions
+            </button>
+          </div>
+          <div x-show="loadingCvAdaptation" class="text-center py-12">
+            <div class="spin text-4xl mb-4">⟳</div>
+            <p class="text-slate-400 text-sm">Analyzing your CV against the job description...</p>
+          </div>
+          <div x-show="cvAdaptation && !loadingCvAdaptation">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold text-sm">CV Adaptation Suggestions</h3>
+              <div class="flex gap-2">
+                <button @click="copyText(cvAdaptation)" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Copy</button>
+                <button @click="downloadText(cvAdaptation, 'cv-suggestions.md')" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Download</button>
+                <button @click="cvAdaptation = ''" class="text-xs text-slate-400 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition-colors">Regenerate</button>
+              </div>
+            </div>
+            <div class="md-content bg-slate-800 rounded-xl p-5 text-sm" x-html="renderMarkdown(cvAdaptation)"></div>
+          </div>
+        </div>
+
+      </div><!-- /tab content -->
+
+      <!-- Modal footer -->
+      <div class="px-5 sm:px-6 py-4 border-t border-slate-800 flex items-center justify-between">
+        <button @click="toggleSave(selectedJob)" class="flex items-center gap-2 text-sm transition-colors" :class="isJobSaved(selectedJob) ? 'text-rose-400 hover:text-rose-300' : 'text-slate-400 hover:text-white'">
+          <span x-text="isJobSaved(selectedJob) ? '❤️ Saved' : '🤍 Save for later'"></span>
+        </button>
+        <button @click="closeJob()" class="text-sm text-slate-500 hover:text-white px-4 py-2 border border-slate-700 hover:border-slate-500 rounded-xl transition-colors">
+          Close
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Toast notification ─────────────────────────────────────────────────── -->
+  <div
+    x-show="notification"
+    x-cloak
+    x-transition:enter="transition ease-out duration-200"
+    x-transition:enter-start="opacity-0 translate-y-2"
+    x-transition:enter-end="opacity-100 translate-y-0"
+    x-transition:leave="transition ease-in duration-150"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    class="fixed bottom-5 right-5 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm shadow-xl z-50"
+    x-text="notification"
+  ></div>
+
+</div><!-- /x-data -->
+
+<!-- ─────────────────────────────────────────── Alpine.js app ──────────────── -->
+<script>
+function seekerApp() {
+  return {
+    step: 'upload',
+    isDragging: false,
+    uploadError: '',
+    profile: null,
+    cvb: {
+      sessionId: null,
+      messages: [],
+      cv: null,
+      input: '',
+      loading: false,
+      done: false,
+      mobileTab: 'chat',
+    },
+    prefs: {
+      target_roles_text: '',
+      country: '',
+      remote_scope: 'worldwide',
+      employment_type: 'both',
+      min_salary: '',
+      max_days_old: 14,
+      excluded_keywords_text: '',
+      extra_notes: '',
+      top_n: 20,
+      min_score: 50,
+    },
+    searchState: { id: null, status: '', scraped: 0, scored: 0, total: 0, error: null },
+    jobs: [],
+    summary: '',
+    filters: { remote_scope: '', min_score: 0 },
+    selectedJob: null,
+    activeTab: 'overview',
+    coverLetter: '',
+    cvAdaptation: '',
+    loadingCoverLetter: false,
+    loadingCvAdaptation: false,
+    savedJobs: [],
+    notification: null,
+    _notifTimer: null,
+    stepList: [
+      { id: 'profile', label: 'Profile' },
+      { id: 'preferences', label: 'Preferences' },
+      { id: 'searching', label: 'Search' },
+      { id: 'results', label: 'Results' },
+    ],
+
+    async init() {
+      // Check for a saved profile
+      try {
+        const res = await fetch('/api/profile');
+        const data = await res.json();
+        if (data.exists) {
+          this.profile = data.profile;
+          this.step = 'profile';
+          this._prefillFromProfile();
+        }
+        // Load saved preferences on top
+        const pr = await fetch('/api/preferences');
+        const pd = await pr.json();
+        if (pd.exists) this._applyPrefs(pd.preferences);
+        // Load saved jobs
+        await this._loadSavedJobs();
+      } catch (_) {}
+    },
+
+    _prefillFromProfile() {
+      if (!this.profile) return;
+      this.prefs.target_roles_text = (this.profile.target_titles || []).slice(0, 2).join(', ');
+      if (this.profile.location) {
+        const parts = this.profile.location.split(',');
+        this.prefs.country = parts[parts.length - 1].trim();
+      }
+    },
+
+    _applyPrefs(p) {
+      if (p.remote_scope)        this.prefs.remote_scope = p.remote_scope;
+      if (p.employment_type)     this.prefs.employment_type = p.employment_type;
+      if (p.min_salary)          this.prefs.min_salary = p.min_salary;
+      if (p.max_days_old)        this.prefs.max_days_old = p.max_days_old;
+      if (p.extra_notes)         this.prefs.extra_notes = p.extra_notes;
+      if (p.excluded_keywords?.length) this.prefs.excluded_keywords_text = p.excluded_keywords.join(', ');
+      if (p.country)             this.prefs.country = p.country;
+      if (p.target_roles?.length) this.prefs.target_roles_text = p.target_roles.join(', ');
+    },
+
+    // ── File upload ─────────────────────────────────────────────────────────
+
+    handleFileSelect(e) { const f = e.target.files[0]; if (f) this.uploadCV(f); },
+    handleFileDrop(e)   { const f = e.dataTransfer.files[0]; if (f) this.uploadCV(f); },
+
+    async uploadCV(file) {
+      this.uploadError = '';
+      this.step = 'extracting';
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const res = await fetch('/api/cv/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Upload failed');
+        this.profile = data.profile;
+        this._prefillFromProfile();
+        // Try to restore saved preferences (override country/roles from saved prefs if present)
+        const pr = await fetch('/api/preferences');
+        const pd = await pr.json();
+        if (pd.exists) this._applyPrefs(pd.preferences);
+        this.step = 'profile';
+      } catch (e) {
+        this.uploadError = e.message;
+        this.step = 'upload';
+      }
+    },
+
+    // ── Search ──────────────────────────────────────────────────────────────
+
+    async startSearch() {
+      const wishes = {
+        target_roles: this._splitCSV(this.prefs.target_roles_text),
+        country: this.prefs.country.trim(),
+        remote_scope: this.prefs.remote_scope,
+        employment_type: this.prefs.employment_type,
+        min_salary: this._parseSalary(this.prefs.min_salary),
+        excluded_keywords: this._splitCSV(this.prefs.excluded_keywords_text),
+        extra_notes: this.prefs.extra_notes.trim(),
+      };
+      const userPrefs = {
+        wishes,
+        remote_only: true,
+        max_days_old: parseInt(this.prefs.max_days_old) || 14,
+      };
+
+      // Persist preferences
+      await fetch('/api/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          remote_scope: this.prefs.remote_scope,
+          employment_type: this.prefs.employment_type,
+          min_salary: wishes.min_salary,
+          max_days_old: userPrefs.max_days_old,
+          extra_notes: this.prefs.extra_notes,
+          excluded_keywords: wishes.excluded_keywords,
+          country: this.prefs.country,
+          target_roles: wishes.target_roles,
+        }),
+      });
+
+      // Start search
+      const res = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preferences: userPrefs,
+          top_n: parseInt(this.prefs.top_n) || 20,
+          min_score: parseFloat(this.prefs.min_score) || 50,
+        }),
+      });
+      const { search_id } = await res.json();
+      this.searchState = { id: search_id, status: 'scraping', scraped: 0, scored: 0, total: 0, error: null };
+      this.step = 'searching';
+
+      // Stream progress via SSE
+      const es = new EventSource(`/api/search/${search_id}/events`);
+      es.onmessage = async (e) => {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'status') {
+          this.searchState = { ...this.searchState, ...evt };
+          if (evt.status === 'complete') {
+            es.close();
+            await this._loadResults(search_id);
+          } else if (evt.status === 'error') {
+            es.close();
+          }
+        }
+      };
+      es.onerror = () => es.close();
+    },
+
+    async _loadResults(id) {
+      const res = await fetch(`/api/search/${id}/results`);
+      const data = await res.json();
+      this.jobs = data.jobs || [];
+      this.summary = data.summary || '';
+      this.filters = { remote_scope: '', min_score: 0 };
+      this.step = 'results';
+    },
+
+    // ── Filtering ───────────────────────────────────────────────────────────
+
+    filteredJobs() {
+      return this.jobs.filter(j => {
+        if (this.filters.remote_scope && j.remote_scope !== this.filters.remote_scope) return false;
+        if (this.filters.min_score > 0 && j.match_score < +this.filters.min_score) return false;
+        return true;
+      });
+    },
+
+    // ── Job detail modal ────────────────────────────────────────────────────
+
+    openJob(job) {
+      this.selectedJob = job;
+      this.activeTab = 'overview';
+      this.coverLetter = '';
+      this.cvAdaptation = '';
+      this.loadingCoverLetter = false;
+      this.loadingCvAdaptation = false;
+    },
+
+    closeJob() { this.selectedJob = null; },
+
+    async generateCoverLetter() {
+      this.loadingCoverLetter = true;
+      try {
+        const res = await fetch('/api/cover-letter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job: this.selectedJob }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        this.coverLetter = data.cover_letter;
+      } catch (e) {
+        this.notify('Failed to generate cover letter: ' + e.message);
+      } finally {
+        this.loadingCoverLetter = false;
+      }
+    },
+
+    async generateCvAdaptation() {
+      this.loadingCvAdaptation = true;
+      try {
+        const res = await fetch('/api/adapt-cv', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job: this.selectedJob }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        this.cvAdaptation = data.adaptation;
+      } catch (e) {
+        this.notify('Failed to generate CV suggestions: ' + e.message);
+      } finally {
+        this.loadingCvAdaptation = false;
+      }
+    },
+
+    // ── Saved jobs ──────────────────────────────────────────────────────────
+
+    async toggleSave(job) {
+      if (!job) return;
+      if (this.isJobSaved(job)) {
+        await fetch(`/api/saved-jobs/${encodeURIComponent(job.url)}`, { method: 'DELETE' });
+        await this._loadSavedJobs();
+        this.notify('Removed from saved jobs');
+      } else {
+        await fetch('/api/saved-jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            location: job.location,
+            salary: job.salary,
+            source: job.source,
+            posted_date: job.posted_date,
+            apply_url: job.apply_url || job.url,
+            remote_scope: job.remote_scope,
+            match_score: job.match_score,
+            match_reasons: job.match_reasons,
+            match_concerns: job.match_concerns,
+            description_excerpt: (job.description || '').slice(0, 300),
+            saved_at: new Date().toISOString(),
+          }),
+        });
+        await this._loadSavedJobs();
+        this.notify('Saved!');
+      }
+    },
+
+    async _loadSavedJobs() {
+      try {
+        const res = await fetch('/api/saved-jobs');
+        this.savedJobs = await res.json();
+      } catch (_) {}
+    },
+
+    isJobSaved(job) {
+      return job ? this.savedJobs.some(j => j.url === job.url) : false;
+    },
+
+    goSaved() { this.step = 'saved'; },
+
+    // ── UI helpers ──────────────────────────────────────────────────────────
+
+    // ── CV Builder ──────────────────────────────────────────────────────────
+
+    async startCvBuilder() {
+      this.cvb = { sessionId: null, messages: [], cv: null, input: '', loading: true, done: false, mobileTab: 'chat' };
+      this.step = 'cv-builder';
+      try {
+        const res = await fetch('/api/cv-builder/start', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Failed to start');
+        this.cvb.sessionId = data.session_id;
+        this.cvb.cv = data.cv;
+        this.cvb.messages = [{ role: 'assistant', content: data.message }];
+      } catch (e) {
+        this.notify('CV Builder error: ' + e.message);
+        this.step = 'profile';
+      } finally {
+        this.cvb.loading = false;
+      }
+    },
+
+    async sendCvMessage() {
+      const text = this.cvb.input.trim();
+      if (!text || this.cvb.loading || this.cvb.done) return;
+      this.cvb.messages.push({ role: 'user', content: text });
+      this.cvb.input = '';
+      this.cvb.loading = true;
+      this._scrollChat();
+      try {
+        const res = await fetch('/api/cv-builder/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: this.cvb.sessionId, message: text }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Error');
+        this.cvb.messages.push({ role: 'assistant', content: data.message });
+        this.cvb.cv = data.cv;
+        this.cvb.done = data.done;
+        if (data.done) this.notify('CV complete! Download it using the button above.');
+      } catch (e) {
+        this.cvb.messages.push({ role: 'assistant', content: '⚠ Error: ' + e.message });
+      } finally {
+        this.cvb.loading = false;
+        this.$nextTick(() => this._scrollChat());
+      }
+    },
+
+    _scrollChat() {
+      this.$nextTick(() => {
+        const el = this.$refs.chatScroll;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    resetProfile() {
+      this.profile = null;
+      this.jobs = [];
+      this.summary = '';
+      this.step = 'upload';
+    },
+
+    searchStatusText() {
+      const s = this.searchState.status;
+      if (s === 'scraping')     return 'Scraping 9 job boards...';
+      if (s === 'scoring')      return `Scoring ${this.searchState.total} jobs with Claude AI...`;
+      if (s === 'summarizing')  return 'Generating career summary...';
+      if (s === 'complete')     return `Done — found ${this.jobs.length} matches!`;
+      return 'Starting...';
+    },
+
+    stepState(id) {
+      const order = ['profile', 'preferences', 'searching', 'results'];
+      const ci = order.indexOf(this.step);
+      const si = order.indexOf(id);
+      if (ci > si) return 'done';
+      if (ci === si) return 'current';
+      return 'upcoming';
+    },
+
+    inferLevel(years) {
+      if (!years || years <= 2) return 'Junior';
+      if (years <= 5) return 'Mid-level';
+      if (years <= 9) return 'Senior';
+      return 'Lead / Principal';
+    },
+
+    scoreHex(s) {
+      if (s >= 80) return '#4ade80';
+      if (s >= 60) return '#facc15';
+      return '#fb923c';
+    },
+
+    scoreBg(s) {
+      if (s >= 80) return 'bg-green-900/40 border border-green-700/40';
+      if (s >= 60) return 'bg-yellow-900/40 border border-yellow-700/40';
+      return 'bg-orange-900/40 border border-orange-700/40';
+    },
+
+    scoreBarColor(s) {
+      if (s >= 80) return 'bg-green-500';
+      if (s >= 60) return 'bg-yellow-500';
+      return 'bg-orange-500';
+    },
+
+    scopeBadge(scope) {
+      if (!scope || scope === 'Unspecified') return 'bg-slate-800 text-slate-500 border border-slate-700';
+      if (scope.match(/Worldwide/i))          return 'bg-green-900/60 text-green-400 border border-green-800/40';
+      if (scope.match(/Europe|EU|EMEA/i))     return 'bg-blue-900/60 text-blue-400 border border-blue-800/40';
+      if (scope.match(/US/i))                 return 'bg-orange-900/60 text-orange-400 border border-orange-800/40';
+      if (scope.match(/UK/i))                 return 'bg-purple-900/60 text-purple-400 border border-purple-800/40';
+      if (scope.match(/Canada/i))             return 'bg-red-900/60 text-red-400 border border-red-800/40';
+      if (scope.match(/Australia/i))          return 'bg-teal-900/60 text-teal-400 border border-teal-800/40';
+      return 'bg-slate-800 text-slate-400 border border-slate-700';
+    },
+
+    renderMarkdown(text) {
+      if (!text || typeof marked === 'undefined') return text || '';
+      try { return marked.parse(text); } catch (_) { return text; }
+    },
+
+    // ── Clipboard / download ────────────────────────────────────────────────
+
+    async copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        this.notify('Copied to clipboard!');
+      } catch (_) { this.notify('Copy failed'); }
+    },
+
+    downloadText(content, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([content], { type: 'text/plain' }));
+      a.download = filename;
+      a.click();
+    },
+
+    // ── Utilities ────────────────────────────────────────────────────────────
+
+    _splitCSV(str) {
+      return str ? str.split(',').map(s => s.trim()).filter(Boolean) : [];
+    },
+
+    _parseSalary(val) {
+      if (!val) return null;
+      const n = parseInt(String(val).replace(/,/g, '').replace(/k/gi, '000').replace(/\$/g, '').trim());
+      return isNaN(n) ? null : n;
+    },
+
+    notify(msg) {
+      this.notification = msg;
+      if (this._notifTimer) clearTimeout(this._notifTimer);
+      this._notifTimer = setTimeout(() => { this.notification = null; }, 3000);
+    },
+  };
+}
+</script>
+</body>
+</html>

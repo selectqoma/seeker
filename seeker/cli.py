@@ -206,6 +206,32 @@ def sources():
 
 
 @app.command()
+def web(
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes"),
+):
+    """Launch the Seeker web UI in your browser."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]uvicorn not installed.[/red] Run: [cyan]pip install uvicorn[standard][/cyan]")
+        raise typer.Exit(1)
+
+    url = f"http://{host}:{port}"
+    console.print(
+        Panel(
+            f"Starting Seeker Web UI\n\n"
+            f"Open [bold cyan link={url}]{url}[/bold cyan link] in your browser.\n\n"
+            f"[dim]Press Ctrl+C to stop.[/dim]",
+            title="[bold]Seeker Web[/bold]",
+            border_style="cyan",
+        )
+    )
+    uvicorn.run("seeker.web.app:app", host=host, port=port, reload=reload)
+
+
+@app.command()
 def demo():
     """Run a quick demo without a real CV."""
     console.print(
