@@ -58,13 +58,13 @@
   <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
     <div class="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
       <div class="flex items-center gap-3">
-        <span class="text-xl font-black text-indigo-400 tracking-tight">SEEKER</span>
+        <button @click="step = profile ? 'profile' : 'upload'" class="text-xl font-black text-indigo-400 tracking-tight hover:text-indigo-300 transition-colors">SEEKER</button>
         <span class="text-slate-600 text-xs hidden sm:block">AI Job Search</span>
       </div>
       <div class="flex items-center gap-3">
         <button
           x-show="profile && step !== 'upload' && step !== 'extracting' && step !== 'cv-builder'"
-          @click="startCvBuilder()"
+          @click="startCvBuilder(cvDraftExists)"
           class="text-emerald-400 hover:text-emerald-300 text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors font-medium"
         >
           ✦ Build CV
@@ -210,13 +210,32 @@
           Re-upload
         </button>
       </div>
-      <button
-        @click="startCvBuilder()"
-        class="w-full border border-emerald-700/50 bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-300 font-medium py-3 px-6 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
-      >
-        <span>✦</span>
-        <span>Build a better CV first — AI consultant will iterate with you</span>
-      </button>
+      <!-- CV Builder buttons -->
+      <template x-if="cvDraftExists">
+        <div class="flex gap-3">
+          <button
+            @click="startCvBuilder(true)"
+            class="flex-1 border border-emerald-700/50 bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-300 font-medium py-3 px-6 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
+          >
+            <span>✦</span>
+            <span>Continue editing your CV</span>
+          </button>
+          <button
+            @click="startCvBuilder(false)"
+            class="px-4 py-3 text-slate-500 hover:text-slate-300 border border-slate-700 hover:border-slate-500 rounded-xl transition-colors text-sm"
+            title="Start fresh from your uploaded CV"
+          >Start fresh</button>
+        </div>
+      </template>
+      <template x-if="!cvDraftExists">
+        <button
+          @click="startCvBuilder(false)"
+          class="w-full border border-emerald-700/50 bg-emerald-900/20 hover:bg-emerald-900/40 text-emerald-300 font-medium py-3 px-6 rounded-xl transition-colors text-sm flex items-center justify-center gap-2"
+        >
+          <span>✦</span>
+          <span>Build a better CV first — AI consultant will iterate with you</span>
+        </button>
+      </template>
     </div>
 
     <!-- ┌─ PREFERENCES ──────────────────────────────────────────────────────┐ -->
@@ -649,93 +668,45 @@
           class="lg:col-span-3 bg-slate-900/50 border border-slate-700 rounded-2xl overflow-hidden flex flex-col"
           :class="cvb.mobileTab==='preview' ? '' : 'hidden lg:flex'"
         >
-          <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 shrink-0">
-            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Live CV Preview</span>
-            <span class="text-xs text-slate-600">Updates as Claude refines it</span>
-          </div>
-          <div class="flex-1 overflow-y-auto p-5">
-            <div class="cv-preview" x-show="cvb.cv">
-              <!-- Header -->
-              <h1 x-text="cvb.cv?.name || '—'"></h1>
-              <p class="text-slate-400 text-xs mt-1 mb-1" x-text="[cvb.cv?.email, cvb.cv?.phone, cvb.cv?.location, cvb.cv?.linkedin, cvb.cv?.github].filter(Boolean).join(' · ')"></p>
-              <p x-show="cvb.cv?.headline" class="text-slate-300 italic text-sm mb-4" x-text="cvb.cv?.headline"></p>
-
-              <!-- Summary -->
-              <template x-if="cvb.cv?.summary">
-                <div class="mb-4">
-                  <div class="cv-section-title">Professional Summary</div>
-                  <p class="text-slate-300 text-sm leading-relaxed" x-text="cvb.cv.summary"></p>
-                </div>
-              </template>
-
-              <!-- Experience -->
-              <template x-if="cvb.cv?.experience?.length">
-                <div class="mb-4">
-                  <div class="cv-section-title">Experience</div>
-                  <template x-for="(job, i) in cvb.cv.experience" :key="i">
-                    <div class="mb-3">
-                      <div class="flex items-baseline justify-between">
-                        <span class="font-bold text-white text-sm" x-text="job.company"></span>
-                        <span class="text-xs text-slate-500" x-text="job.period"></span>
-                      </div>
-                      <div class="italic text-slate-400 text-xs mb-1" x-text="job.title"></div>
-                      <ul class="list-disc list-inside space-y-0.5">
-                        <template x-for="(b, j) in job.bullets" :key="j">
-                          <li class="text-slate-300 text-xs leading-relaxed" x-text="b"></li>
-                        </template>
-                      </ul>
-                    </div>
-                  </template>
-                </div>
-              </template>
-
-              <!-- Skills -->
-              <template x-if="cvb.cv?.skills && Object.keys(cvb.cv.skills).length">
-                <div class="mb-4">
-                  <div class="cv-section-title">Skills</div>
-                  <template x-for="[cat, items] in Object.entries(cvb.cv.skills)" :key="cat">
-                    <p class="text-xs mb-1">
-                      <strong class="text-slate-300" x-text="cat + ':'"></strong>
-                      <span class="text-slate-400" x-text="' ' + (Array.isArray(items) ? items.join(', ') : items)"></span>
-                    </p>
-                  </template>
-                </div>
-              </template>
-
-              <!-- Education -->
-              <template x-if="cvb.cv?.education?.length">
-                <div class="mb-4">
-                  <div class="cv-section-title">Education</div>
-                  <template x-for="(edu, i) in cvb.cv.education" :key="i">
-                    <div class="mb-2 text-xs">
-                      <span class="font-semibold text-white" x-text="typeof edu === 'string' ? edu : edu.institution"></span>
-                      <span x-show="typeof edu !== 'string' && edu.degree" class="text-slate-400" x-text="' — ' + (edu.degree||'')"></span>
-                      <span x-show="typeof edu !== 'string' && edu.year" class="text-slate-500" x-text="' · ' + (edu.year||'')"></span>
-                    </div>
-                  </template>
-                </div>
-              </template>
-
-              <!-- Languages + Certs -->
-              <template x-if="cvb.cv?.languages?.length || cvb.cv?.certifications?.length">
-                <div>
-                  <div class="cv-section-title">Additional</div>
-                  <p x-show="cvb.cv?.languages?.length" class="text-xs mb-1">
-                    <strong class="text-slate-300">Languages:</strong>
-                    <span class="text-slate-400" x-text="' ' + cvb.cv.languages.join(', ')"></span>
-                  </p>
-                  <p x-show="cvb.cv?.certifications?.length" class="text-xs">
-                    <strong class="text-slate-300">Certifications:</strong>
-                    <span class="text-slate-400" x-text="' ' + cvb.cv.certifications.join(', ')"></span>
-                  </p>
-                </div>
-              </template>
-
-              <!-- Empty state -->
-              <div x-show="!cvb.cv?.name && !cvb.cv?.summary" class="text-slate-600 text-sm text-center py-8">
-                Your CV will appear here as Claude refines it...
-              </div>
+          <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 shrink-0 gap-3">
+            <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide shrink-0">CV Preview</span>
+            <!-- Mode toggle -->
+            <div class="flex rounded-lg overflow-hidden border border-slate-700">
+              <button
+                @click="switchToBasicPreview()"
+                :class="cvb.previewMode==='basic' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'"
+                class="text-xs px-3 py-1 transition-colors"
+              >Basic</button>
+              <button
+                @click="generateDesignPreview()"
+                :disabled="cvb.generatingPreview"
+                :class="cvb.previewMode==='design' ? 'bg-emerald-800 text-emerald-300' : 'text-slate-500 hover:text-slate-300'"
+                class="text-xs px-3 py-1 transition-colors disabled:opacity-50 flex items-center gap-1"
+              >
+                <span x-show="cvb.generatingPreview" class="spin text-xs">⟳</span>
+                <span>✦ Design</span>
+              </button>
             </div>
+            <span class="text-xs text-slate-600 ml-auto" x-show="cvb.previewMode==='basic'">Updates after each reply</span>
+            <span class="text-xs text-slate-600 ml-auto" x-show="cvb.previewMode==='design' && !cvb.generatingPreview">
+              AI-designed · <button @click="generateDesignPreview(true)" class="underline hover:text-slate-400">refresh</button>
+            </span>
+          </div>
+          <!-- iframe preview -->
+          <div class="relative flex-1 min-h-0">
+            <div
+              x-show="cvb.generatingPreview"
+              class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/85"
+            >
+              <div class="spin text-3xl mb-3 text-emerald-400">✦</div>
+              <p class="text-slate-300 text-sm font-medium">Designing your CV...</p>
+              <p class="text-slate-500 text-xs mt-1">~15 seconds</p>
+            </div>
+            <iframe
+              x-ref="previewFrame"
+              class="w-full h-full border-0 bg-white"
+              style="min-height:580px"
+            ></iframe>
           </div>
         </div>
 
@@ -978,6 +949,8 @@ function seekerApp() {
       done: false,
       mobileTab: 'chat',
       generatingPdf: false,
+      generatingPreview: false,
+      previewMode: 'basic',
     },
     prefs: {
       target_roles_text: '',
@@ -1002,6 +975,7 @@ function seekerApp() {
     loadingCoverLetter: false,
     loadingCvAdaptation: false,
     savedJobs: [],
+    cvDraftExists: false,
     notification: null,
     _notifTimer: null,
     stepList: [
@@ -1027,6 +1001,10 @@ function seekerApp() {
         if (pd.exists) this._applyPrefs(pd.preferences);
         // Load saved jobs
         await this._loadSavedJobs();
+        // Check for a persisted CV draft
+        const dr = await fetch('/api/cv-builder/draft');
+        const dd = await dr.json();
+        if (dd.exists) this.cvDraftExists = true;
       } catch (_) {}
     },
 
@@ -1261,16 +1239,29 @@ function seekerApp() {
 
     // ── CV Builder ──────────────────────────────────────────────────────────
 
-    async startCvBuilder() {
-      this.cvb = { sessionId: null, messages: [], cv: null, input: '', loading: true, done: false, mobileTab: 'chat' };
+    async startCvBuilder(useDraft = false) {
+      this.cvb = { sessionId: null, messages: [], cv: null, input: '', loading: true, done: false, mobileTab: 'chat', generatingPdf: false, generatingPreview: false, previewMode: 'basic' };
       this.step = 'cv-builder';
+      let existingDraft = null;
+      if (useDraft) {
+        try {
+          const dr = await fetch('/api/cv-builder/draft');
+          const dd = await dr.json();
+          if (dd.exists) existingDraft = dd.cv;
+        } catch (_) {}
+      }
       try {
-        const res = await fetch('/api/cv-builder/start', { method: 'POST' });
+        const res = await fetch('/api/cv-builder/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(existingDraft ? { existing_draft: existingDraft } : {}),
+        });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Failed to start');
         this.cvb.sessionId = data.session_id;
         this.cvb.cv = data.cv;
         this.cvb.messages = [{ role: 'assistant', content: data.message }];
+        this.$nextTick(() => this._refreshBasicPreview());
       } catch (e) {
         this.notify('CV Builder error: ' + e.message);
         this.step = 'profile';
@@ -1298,6 +1289,19 @@ function seekerApp() {
         this.cvb.cv = data.cv;
         this.cvb.done = data.done;
         if (data.done) this.notify('CV complete! Download it using the button above.');
+        // Auto-save draft (fire and forget)
+        fetch('/api/cv-builder/save-draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cv: data.cv }),
+        }).then(() => { this.cvDraftExists = true; }).catch(() => {});
+        // Refresh preview: basic reloads automatically; design preview is now stale
+        if (this.cvb.previewMode === 'basic') {
+          this._refreshBasicPreview();
+        } else {
+          this.cvb.previewMode = 'basic';
+          this._refreshBasicPreview();
+        }
       } catch (e) {
         this.cvb.messages.push({ role: 'assistant', content: '⚠ Error: ' + e.message });
       } finally {
@@ -1327,6 +1331,44 @@ function seekerApp() {
         this.notify('PDF error: ' + e.message);
       } finally {
         this.cvb.generatingPdf = false;
+      }
+    },
+
+    _refreshBasicPreview() {
+      const frame = this.$refs.previewFrame;
+      if (!frame || !this.cvb.sessionId) return;
+      if (frame._blobUrl) { URL.revokeObjectURL(frame._blobUrl); frame._blobUrl = null; }
+      frame.src = `/api/cv-builder/${this.cvb.sessionId}/preview?t=${Date.now()}`;
+    },
+
+    switchToBasicPreview() {
+      this.cvb.previewMode = 'basic';
+      this._refreshBasicPreview();
+    },
+
+    async generateDesignPreview(forceRefresh = false) {
+      if (this.cvb.generatingPreview) return;
+      this.cvb.generatingPreview = true;
+      this.cvb.previewMode = 'design';
+      try {
+        const url = `/api/cv-builder/${this.cvb.sessionId}/pretty-preview${forceRefresh ? '?refresh=true' : ''}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || res.statusText);
+        }
+        const html = await res.text();
+        const frame = this.$refs.previewFrame;
+        if (frame._blobUrl) URL.revokeObjectURL(frame._blobUrl);
+        const blob = new Blob([html], { type: 'text/html' });
+        frame._blobUrl = URL.createObjectURL(blob);
+        frame.src = frame._blobUrl;
+      } catch (e) {
+        this.notify('Design preview error: ' + e.message);
+        this.cvb.previewMode = 'basic';
+        this._refreshBasicPreview();
+      } finally {
+        this.cvb.generatingPreview = false;
       }
     },
 

@@ -100,12 +100,15 @@ CV DATA
 # ── Agent call ────────────────────────────────────────────────────────────────
 
 
-def generate_pretty_html(cv: dict, client: anthropic.Anthropic) -> str:
+def generate_pretty_html(cv: dict, client: anthropic.Anthropic, design_notes: list[str] | None = None) -> str:
     """
     Design agent: call Claude Sonnet to produce a beautiful HTML CV.
     Returns the raw HTML string.
     """
     prompt = _DESIGN_PROMPT.replace("{cv_json}", json.dumps(cv, indent=2))
+    if design_notes:
+        notes_block = "\n".join(f"  • {n}" for n in design_notes)
+        prompt += f"\n\n────────────────────────────────────────────\nDESIGN PREFERENCES (apply these to the visual design)\n────────────────────────────────────────────\n{notes_block}\n"
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
@@ -156,7 +159,7 @@ async def html_to_pdf(html: str) -> bytes:
 # ── Convenience: full pipeline ────────────────────────────────────────────────
 
 
-async def generate_pretty_pdf(cv: dict, client: anthropic.Anthropic) -> bytes:
+async def generate_pretty_pdf(cv: dict, client: anthropic.Anthropic, design_notes: list[str] | None = None) -> bytes:
     """Design agent → Playwright → PDF bytes. One call does it all."""
-    html = generate_pretty_html(cv, client)
+    html = generate_pretty_html(cv, client, design_notes)
     return await html_to_pdf(html)

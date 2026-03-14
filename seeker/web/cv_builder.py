@@ -51,6 +51,19 @@ Valid fields:
 
 When the CV is complete and the user says they are happy with it, end your message with the exact token: <cv_complete/>
 
+## Aesthetic / design preferences
+If the user expresses any preference about the CV's *visual design* — colors, layout style, typography, spacing, section order, sidebar vs single-column, minimalism, classical look, etc. — acknowledge it warmly and emit a design note:
+
+<design_note>concise description of the preference, e.g. "minimal single-column, monochrome, lots of whitespace, no color fills"</design_note>
+
+Examples that should trigger a design note:
+- "make it more minimal / cleaner"  →  <design_note>minimal, clean, generous whitespace</design_note>
+- "I prefer a dark sidebar"          →  <design_note>two-column layout, dark navy sidebar with white text, skills/contact in sidebar</design_note>
+- "use green as accent color"        →  <design_note>green accent color (#16a34a) instead of blue</design_note>
+- "classic black-and-white look"     →  <design_note>classic monochrome, Georgia serif font, no color fills</design_note>
+- "more modern, tech-company feel"   →  <design_note>modern sans-serif, subtle blue accent, compact spacing, tech aesthetic</design_note>
+
+Design notes accumulate — you don't need to re-emit preferences already stated unless they change.
 Keep messages conversational but efficient. Don't repeat information already established."""
 
 
@@ -93,8 +106,8 @@ def _apply_update(draft: dict, update: dict) -> None:
             draft[key] = val
 
 
-def _parse_reply(raw: str) -> tuple[str, dict | None, bool]:
-    """Split Claude's raw reply into (display_text, cv_update_dict, is_done)."""
+def _parse_reply(raw: str) -> tuple[str, dict | None, list[str], bool]:
+    """Split Claude's raw reply into (display_text, cv_update_dict, design_notes, is_done)."""
     cv_update = None
     done = "<cv_complete/>" in raw
 
@@ -106,13 +119,22 @@ def _parse_reply(raw: str) -> tuple[str, dict | None, bool]:
             pass
         raw = raw[: m.start()] + raw[m.end() :]
 
+    design_notes = re.findall(r"<design_note>(.*?)</design_note>", raw, re.DOTALL)
+    design_notes = [n.strip() for n in design_notes if n.strip()]
+    raw = re.sub(r"<design_note>.*?</design_note>", "", raw, flags=re.DOTALL)
+
     display = raw.replace("<cv_complete/>", "").strip()
-    return display, cv_update, done
+    return display, cv_update, design_notes, done
 
 
-def start_session(profile: dict, raw_cv_text: str, client: anthropic.Anthropic) -> tuple[str, str, dict]:
+def start_session(
+    profile: dict,
+    raw_cv_text: str,
+    client: anthropic.Anthropic,
+    existing_draft: dict | None = None,
+) -> tuple[str, str, dict]:
     """Initialise a new session. Returns (session_id, first_assistant_message, cv_draft)."""
-    draft = _profile_to_draft(profile)
+    draft = existing_draft if existing_draft else _profile_to_draft(profile)
     session_id = uuid.uuid4().hex[:8]
 
     system = (
@@ -122,11 +144,17 @@ def start_session(profile: dict, raw_cv_text: str, client: anthropic.Anthropic) 
     if raw_cv_text:
         system += f"\n\n## Original CV raw text (for context):\n{raw_cv_text[:3000]}"
 
-    seed_msg = (
-        "Hi! I want to work through my CV with you and make it as strong as possible. "
-        "Please start by reviewing what you already have about me, tell me the 2–3 biggest "
-        "improvement opportunities, and then guide me through improving each section."
-    )
+    if existing_draft:
+        seed_msg = (
+            "Hi! I want to continue improving my CV. You have the current draft in your context. "
+            "Please briefly recap the main sections as they stand, then ask me what I'd like to improve next."
+        )
+    else:
+        seed_msg = (
+            "Hi! I want to work through my CV with you and make it as strong as possible. "
+            "Please start by reviewing what you already have about me, tell me the 2–3 biggest "
+            "improvement opportunities, and then guide me through improving each section."
+        )
 
     resp = client.messages.create(
         model="claude-sonnet-4-6",
@@ -135,7 +163,7 @@ def start_session(profile: dict, raw_cv_text: str, client: anthropic.Anthropic) 
         messages=[{"role": "user", "content": seed_msg}],
     )
     raw_reply = resp.content[0].text
-    display, cv_update, done = _parse_reply(raw_reply)
+    display, cv_update, design_notes, done = _parse_reply(raw_reply)
     if cv_update:
         _apply_update(draft, cv_update)
 
@@ -145,9 +173,11 @@ def start_session(profile: dict, raw_cv_text: str, client: anthropic.Anthropic) 
                 {"role": "user",      "content": seed_msg},
                 {"role": "assistant", "content": raw_reply},
             ],
-            "cv_draft": draft,
-            "system":   system,
-            "done":     done,
+            "cv_draft":        draft,
+            "system":          system,
+            "done":            done,
+            "design_notes":    design_notes,
+            "pretty_html":     None,
         }
 
     return session_id, display, draft
@@ -169,10 +199,15 @@ def chat(session_id: str, user_message: str, client: anthropic.Anthropic) -> tup
         messages=session["messages"],
     )
     raw_reply = resp.content[0].text
-    display, cv_update, done = _parse_reply(raw_reply)
+    display, cv_update, design_notes, done = _parse_reply(raw_reply)
 
     if cv_update:
         _apply_update(session["cv_draft"], cv_update)
+        session["pretty_html"] = None  # invalidate cache on CV content change
+
+    if design_notes:
+        session["design_notes"].extend(design_notes)
+        session["pretty_html"] = None  # invalidate cache on style change
 
     session["messages"].append({"role": "assistant", "content": raw_reply})
     session["done"] = done

@@ -12,6 +12,7 @@ import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +35,7 @@ DATA_DIR.mkdir(exist_ok=True)
 PROFILE_PATH = DATA_DIR / "profile.json"
 PREFS_PATH = DATA_DIR / "preferences.json"
 SAVED_JOBS_PATH = DATA_DIR / "saved_jobs.json"
+CV_DRAFT_PATH = DATA_DIR / "cv_draft.json"
 
 # ── In-memory search state ────────────────────────────────────────────────────
 
@@ -320,15 +322,32 @@ async def unsave_job(url: str):
 # ── CV Builder endpoints ──────────────────────────────────────────────────────
 
 
+@app.get("/api/cv-builder/draft")
+async def cv_builder_get_draft():
+    if not CV_DRAFT_PATH.exists():
+        return JSONResponse({"exists": False})
+    return JSONResponse({"exists": True, "cv": json.loads(CV_DRAFT_PATH.read_text())})
+
+
+@app.post("/api/cv-builder/save-draft")
+async def cv_builder_save_draft(body: dict):
+    cv = body.get("cv")
+    if not cv:
+        raise HTTPException(status_code=400, detail="Missing cv")
+    CV_DRAFT_PATH.write_text(json.dumps(cv, indent=2))
+    return JSONResponse({"success": True})
+
+
 @app.post("/api/cv-builder/start")
-async def cv_builder_start():
+async def cv_builder_start(body: Optional[dict] = None):
     if not PROFILE_PATH.exists():
         raise HTTPException(status_code=400, detail="No CV profile found. Please upload your CV first.")
     full = json.loads(PROFILE_PATH.read_text())
     raw_text = full.pop("raw_text", "")
+    existing_draft = body.get("existing_draft") if body else None
     client = _get_client()
     try:
-        session_id, message, draft = cvb.start_session(full, raw_text, client)
+        session_id, message, draft = cvb.start_session(full, raw_text, client, existing_draft)
         return JSONResponse({"session_id": session_id, "message": message, "cv": draft})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -360,6 +379,30 @@ async def cv_builder_preview(session_id: str):
     return HTMLResponse(cvb.render_html(session["cv_draft"]))
 
 
+@app.get("/api/cv-builder/{session_id}/pretty-preview")
+async def cv_builder_pretty_preview(session_id: str, refresh: bool = False):
+    """Return the pretty HTML for the CV (cached; refresh=true forces regen)."""
+    with cvb._sessions_lock:
+        session = cvb._sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    from fastapi.responses import HTMLResponse
+    if not refresh and session.get("pretty_html"):
+        return HTMLResponse(session["pretty_html"])
+    client = _get_client()
+    try:
+        html = await run_in_threadpool(
+            pretty_cv.generate_pretty_html,
+            session["cv_draft"], client, session.get("design_notes"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    with cvb._sessions_lock:
+        if session_id in cvb._sessions:
+            cvb._sessions[session_id]["pretty_html"] = html
+    return HTMLResponse(html)
+
+
 @app.get("/api/cv-builder/{session_id}/pretty-pdf")
 async def cv_builder_pretty_pdf(session_id: str):
     """Design agent (Claude) generates beautiful HTML → Playwright renders to PDF."""
@@ -369,7 +412,19 @@ async def cv_builder_pretty_pdf(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     client = _get_client()
     try:
-        pdf_bytes = await pretty_cv.generate_pretty_pdf(session["cv_draft"], client)
+        # Reuse cached HTML if available (avoids a second Claude call)
+        html = session.get("pretty_html")
+        if html:
+            pdf_bytes = await pretty_cv.html_to_pdf(html)
+        else:
+            html = await run_in_threadpool(
+                pretty_cv.generate_pretty_html,
+                session["cv_draft"], client, session.get("design_notes"),
+            )
+            with cvb._sessions_lock:
+                if session_id in cvb._sessions:
+                    cvb._sessions[session_id]["pretty_html"] = html
+            pdf_bytes = await pretty_cv.html_to_pdf(html)
     except ImportError as e:
         raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
