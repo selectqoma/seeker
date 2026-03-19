@@ -670,27 +670,21 @@
         >
           <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 shrink-0 gap-3">
             <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide shrink-0">CV Preview</span>
-            <!-- Mode toggle -->
-            <div class="flex rounded-lg overflow-hidden border border-slate-700">
+            <div class="flex items-center gap-2 ml-auto">
+              <span x-show="cvb.generatingPreview" class="flex items-center gap-1 text-xs text-emerald-400/80">
+                <span class="spin text-xs">⟳</span> Designing...
+              </span>
+              <span x-show="cvb.previewUpdating && !cvb.generatingPreview" class="flex items-center gap-1 text-xs text-slate-500">
+                <span class="spin text-xs">⟳</span> Updating...
+              </span>
+              <span x-show="cvb.previewMode==='design' && !cvb.generatingPreview && !cvb.previewUpdating" class="text-xs text-emerald-700">✦ AI Design</span>
               <button
-                @click="switchToBasicPreview()"
-                :class="cvb.previewMode==='basic' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'"
-                class="text-xs px-3 py-1 transition-colors"
-              >Basic</button>
-              <button
-                @click="generateDesignPreview()"
-                :disabled="cvb.generatingPreview"
-                :class="cvb.previewMode==='design' ? 'bg-emerald-800 text-emerald-300' : 'text-slate-500 hover:text-slate-300'"
-                class="text-xs px-3 py-1 transition-colors disabled:opacity-50 flex items-center gap-1"
-              >
-                <span x-show="cvb.generatingPreview" class="spin text-xs">⟳</span>
-                <span>✦ Design</span>
-              </button>
+                x-show="cvb.sessionId && !cvb.generatingPreview && !cvb.previewUpdating"
+                @click="generateDesignPreview(true)"
+                class="text-xs text-slate-600 hover:text-slate-300 px-1.5 py-0.5 rounded hover:bg-slate-700/50 transition-colors"
+                title="Regenerate design"
+              >↻</button>
             </div>
-            <span class="text-xs text-slate-600 ml-auto" x-show="cvb.previewMode==='basic'">Updates after each reply</span>
-            <span class="text-xs text-slate-600 ml-auto" x-show="cvb.previewMode==='design' && !cvb.generatingPreview">
-              AI-designed · <button @click="generateDesignPreview(true)" class="underline hover:text-slate-400">refresh</button>
-            </span>
           </div>
           <!-- iframe preview -->
           <div class="relative flex-1 min-h-0">
@@ -950,6 +944,7 @@ function seekerApp() {
       mobileTab: 'chat',
       generatingPdf: false,
       generatingPreview: false,
+      previewUpdating: false,
       previewMode: 'basic',
     },
     prefs: {
@@ -1240,7 +1235,7 @@ function seekerApp() {
     // ── CV Builder ──────────────────────────────────────────────────────────
 
     async startCvBuilder(useDraft = false) {
-      this.cvb = { sessionId: null, messages: [], cv: null, input: '', loading: true, done: false, mobileTab: 'chat', generatingPdf: false, generatingPreview: false, previewMode: 'basic' };
+      this.cvb = { sessionId: null, messages: [], cv: null, input: '', loading: true, done: false, mobileTab: 'chat', generatingPdf: false, generatingPreview: false, previewUpdating: false, previewMode: 'basic' };
       this.step = 'cv-builder';
       let existingDraft = null;
       if (useDraft) {
@@ -1261,7 +1256,7 @@ function seekerApp() {
         this.cvb.sessionId = data.session_id;
         this.cvb.cv = data.cv;
         this.cvb.messages = [{ role: 'assistant', content: data.message }];
-        this.$nextTick(() => this._refreshBasicPreview());
+        this.$nextTick(() => this.generateDesignPreview());
       } catch (e) {
         this.notify('CV Builder error: ' + e.message);
         this.step = 'profile';
@@ -1295,13 +1290,8 @@ function seekerApp() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cv: data.cv }),
         }).then(() => { this.cvDraftExists = true; }).catch(() => {});
-        // Refresh preview: basic reloads automatically; design preview is now stale
-        if (this.cvb.previewMode === 'basic') {
-          this._refreshBasicPreview();
-        } else {
-          this.cvb.previewMode = 'basic';
-          this._refreshBasicPreview();
-        }
+        // Silent background regeneration; keep showing last design while updating
+        this.generateDesignPreview(false, true);
       } catch (e) {
         this.cvb.messages.push({ role: 'assistant', content: '⚠ Error: ' + e.message });
       } finally {
@@ -1346,10 +1336,14 @@ function seekerApp() {
       this._refreshBasicPreview();
     },
 
-    async generateDesignPreview(forceRefresh = false) {
-      if (this.cvb.generatingPreview) return;
-      this.cvb.generatingPreview = true;
-      this.cvb.previewMode = 'design';
+    async generateDesignPreview(forceRefresh = false, silent = false) {
+      if (this.cvb.generatingPreview || this.cvb.previewUpdating) return;
+      if (silent) {
+        this.cvb.previewUpdating = true;
+      } else {
+        this.cvb.generatingPreview = true;
+        this.cvb.previewMode = 'design';
+      }
       try {
         const url = `/api/cv-builder/${this.cvb.sessionId}/pretty-preview${forceRefresh ? '?refresh=true' : ''}`;
         const res = await fetch(url);
@@ -1363,12 +1357,15 @@ function seekerApp() {
         const blob = new Blob([html], { type: 'text/html' });
         frame._blobUrl = URL.createObjectURL(blob);
         frame.src = frame._blobUrl;
+        this.cvb.previewMode = 'design';
       } catch (e) {
-        this.notify('Design preview error: ' + e.message);
-        this.cvb.previewMode = 'basic';
-        this._refreshBasicPreview();
+        if (!silent) {
+          this.notify('Design preview error: ' + e.message);
+          this._refreshBasicPreview();
+        }
       } finally {
         this.cvb.generatingPreview = false;
+        this.cvb.previewUpdating = false;
       }
     },
 
