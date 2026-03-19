@@ -601,10 +601,10 @@
       </div>
 
       <!-- Main split layout -->
-      <div x-show="cvb.sessionId" class="flex-1 grid grid-cols-1 lg:grid-cols-5 gap-4 min-h-0">
+      <div x-show="cvb.sessionId" class="flex-1 grid grid-cols-1 lg:grid-cols-9 gap-4 min-h-0">
 
         <!-- ── Chat panel (left / top on mobile) ─────────────────────────── -->
-        <div class="lg:col-span-2 flex flex-col bg-slate-800/50 border border-slate-700 rounded-2xl overflow-hidden">
+        <div class="lg:col-span-4 flex flex-col bg-slate-800/50 border border-slate-700 rounded-2xl overflow-hidden">
 
           <!-- Mobile tab toggle -->
           <div class="flex border-b border-slate-700 lg:hidden">
@@ -665,7 +665,7 @@
 
         <!-- ── CV Preview panel (right / bottom on mobile) ──────────────── -->
         <div
-          class="lg:col-span-3 bg-slate-900/50 border border-slate-700 rounded-2xl overflow-hidden flex flex-col"
+          class="lg:col-span-5 bg-slate-900/50 border border-slate-700 rounded-2xl overflow-hidden flex flex-col"
           :class="cvb.mobileTab==='preview' ? '' : 'hidden lg:flex'"
         >
           <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 shrink-0 gap-3">
